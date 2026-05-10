@@ -1,0 +1,169 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 260 42% 4%;
+    --foreground: 270 25% 97%;
+
+    --card: 265 38% 7%;
+    --card-foreground: 270 25% 97%;
+
+    --popover: 265 38% 6%;
+    --popover-foreground: 270 25% 97%;
+
+    --primary: 270 92% 68%;
+    --primary-foreground: 265 45% 5%;
+
+    --secondary: 265 28% 13%;
+    --secondary-foreground: 270 25% 96%;
+
+    --muted: 265 22% 11%;
+    --muted-foreground: 265 14% 58%;
+
+    --accent: 280 40% 15%;
+    --accent-foreground: 270 25% 97%;
+
+    --destructive: 350 88% 58%;
+    --destructive-foreground: 270 25% 98%;
+
+    --border: 265 28% 16%;
+    --input: 265 28% 16%;
+    --ring: 270 92% 68%;
+
+    /* Semantic accents — mapped to violet / electric blue / magenta */
+    --clinical-cyan: 217 100% 68%;
+    --clinical-teal: 270 95% 70%;
+    --clinical-mint: 312 88% 68%;
+    --clinical-warn: 45 100% 58%;
+    --clinical-danger: 350 88% 58%;
+
+    --radius: 1.25rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    -webkit-font-smoothing: antialiased;
+    background-color: hsl(var(--background));
+    background-image:
+      radial-gradient(1100px 720px at 12% -15%, hsl(270 85% 26% / 0.5), transparent 58%),
+      radial-gradient(880px 640px at 102% 8%, hsl(312 75% 22% / 0.38), transparent 52%),
+      radial-gradient(900px 520px at 48% 108%, hsl(217 90% 24% / 0.28), transparent 55%),
+      linear-gradient(165deg, hsl(260 44% 5%) 0%, hsl(265 42% 3%) 45%, hsl(260 48% 4%) 100%);
+    background-attachment: fixed;
+  }
+
+  ::selection {
+    background: hsl(var(--clinical-teal) / 0.35);
+    color: hsl(var(--foreground));
+  }
+}
+
+@layer utilities {
+  .grid-bg {
+    background-image:
+      linear-gradient(to right, hsl(var(--border) / 0.4) 1px, transparent 1px),
+      linear-gradient(to bottom, hsl(var(--border) / 0.4) 1px, transparent 1px);
+    background-size: 48px 48px;
+    background-position: -1px -1px;
+    mask-image: radial-gradient(ellipse 85% 70% at 50% 40%, black 18%, transparent 72%);
+    opacity: 0.55;
+  }
+
+  .scanline {
+    background: linear-gradient(
+      to bottom,
+      transparent 0%,
+      hsl(var(--clinical-teal) / 0.14) 50%,
+      transparent 100%
+    );
+  }
+
+  .clinical-glow {
+    box-shadow:
+      0 0 0 1px hsl(var(--clinical-teal) / 0.35),
+      0 0 40px -8px hsl(var(--clinical-teal) / 0.55),
+      inset 0 1px 0 0 hsl(0 0% 100% / 0.06);
+  }
+
+  .panel {
+    @apply rounded-[1.35rem] border border-white/[0.07] bg-white/[0.035] backdrop-blur-2xl;
+    box-shadow:
+      inset 0 1px 0 0 hsl(0 0% 100% / 0.07),
+      0 0 0 1px hsl(270 85% 55% / 0.14),
+      0 28px 56px -24px hsl(0 0% 0% / 0.72),
+      0 0 100px -40px hsl(270 90% 45% / 0.22);
+  }
+
+  .panel-header {
+    @apply flex items-center justify-between border-b border-white/[0.06] px-5 py-3.5;
+  }
+
+  .mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-feature-settings: "ss01", "ss02";
+    letter-spacing: 0.03em;
+  }
+
+  .text-gradient-clinical {
+    background: linear-gradient(
+      115deg,
+      hsl(var(--clinical-teal)) 0%,
+      hsl(var(--clinical-mint)) 42%,
+      hsl(var(--clinical-cyan)) 100%
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .neo-logo-ring {
+    border-radius: 1rem;
+    background: conic-gradient(
+      from 200deg at 50% 50%,
+      hsl(var(--clinical-cyan)) 0deg,
+      hsl(var(--clinical-teal)) 95deg,
+      hsl(var(--clinical-mint)) 200deg,
+      hsl(280 90% 55%) 285deg,
+      hsl(var(--clinical-cyan)) 360deg
+    );
+    box-shadow:
+      0 0 24px -4px hsl(var(--clinical-teal) / 0.65),
+      0 0 48px -12px hsl(var(--clinical-mint) / 0.45);
+  }
+
+  .ring-clinical {
+    box-shadow:
+      0 0 0 1px hsl(var(--clinical-teal) / 0.5),
+      0 0 36px -4px hsl(var(--clinical-teal) / 0.55);
+  }
+
+  .ring-danger {
+    box-shadow:
+      0 0 0 1px hsl(var(--clinical-danger) / 0.55),
+      0 0 36px -4px hsl(var(--clinical-danger) / 0.5);
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 999px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
