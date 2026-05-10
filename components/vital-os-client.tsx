@@ -5,11 +5,8 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
   AlertTriangle,
-  Accessibility,
   BarChart3,
-  BellRing,
   BookText,
-  CheckCircle2,
   ChevronRight,
   CircleDashed,
   CircleDot,
@@ -22,18 +19,13 @@ import {
   MessageCircle,
   Mic,
   MicOff,
-  Monitor,
-  Moon,
   NotebookTabs,
-  Palette,
   Pause,
   Phone,
   Settings,
   ShieldAlert,
   Siren,
-  SlidersHorizontal,
   Sparkles,
-  Sun,
   Users,
   UserRound,
   Volume2,
@@ -413,36 +405,8 @@ type PendingOrder = {
   pharmacyStation: string;
   stepIndex: number;
   completedAt?: number;
-  isClosing?: boolean;
-  closingStartedAt?: number;
   createdAt: number;
 };
-
-type DischargedRecord = {
-  patientId: string;
-  patientName: string;
-  room: string;
-  dischargedAt: number;
-  status: "Completed";
-};
-
-type ThemeMode = "light" | "dark" | "system";
-
-type ParsedAction =
-  | { intent: "discharge_patient"; patientQuery?: string }
-  | { intent: "restore_patient"; patientQuery?: string }
-  | {
-      intent: "update_problem_status";
-      patientQuery?: string;
-      problemName?: string;
-      status: ProblemStatus;
-      allProblems?: boolean;
-    }
-  | { intent: "medication_order"; patientQuery?: string; medication?: string }
-  | { intent: "show_section"; patientQuery?: string; sections: PatientFieldKey[] }
-  | { intent: "allergy_search"; sex?: "M" | "F"; pediatric?: boolean; allergies: string[] }
-  | { intent: "list_patients"; sex?: "M" | "F"; pediatric?: boolean }
-  | { intent: "end_session" };
 
 type VoiceCommandAction =
   | { kind: "none" }
@@ -658,103 +622,6 @@ function parseVoiceCommand(
   return { kind: "open_sections", patientId: target.id, sections: resolvedSections };
 }
 
-function splitCompoundCommands(input: string): string[] {
-  return input
-    .split(/\b(?:and also|also|then|plus|after that| and )\b/gi)
-    .map((x) => x.trim())
-    .filter(Boolean);
-}
-
-function extractAllergyTerms(q: string): string[] {
-  const known = ["penicillin", "peanut", "peanuts", "latex", "sulfa", "shellfish"];
-  const found = known.filter((term) => new RegExp(`\\b${term}\\b`, "i").test(q));
-  const unique = Array.from(new Set(found.map((x) => (x === "peanut" ? "peanuts" : x))));
-  return unique;
-}
-
-function parseCommand(
-  transcript: string,
-  patients: DemoPatient[],
-  selectedPatientId: string | null
-): ParsedAction[] {
-  const chunks = splitCompoundCommands(transcript);
-  const actions: ParsedAction[] = [];
-
-  for (const chunk of chunks) {
-    const q = chunk.toLowerCase();
-    const patientMatch = findPatientMatches(chunk, patients)[0];
-    const patientQuery = patientMatch?.name ?? undefined;
-
-    if (isResetCommand(q) || /end session|logout/.test(q)) {
-      actions.push({ intent: "end_session" });
-      continue;
-    }
-    if (/discharge|ready for discharge|remove .*active roster|clear .*active roster/.test(q)) {
-      actions.push({ intent: "discharge_patient", patientQuery });
-      continue;
-    }
-    if (/restore|bring .* back|reopen/.test(q)) {
-      actions.push({ intent: "restore_patient", patientQuery });
-      continue;
-    }
-    if (/mark all|resolve all|clear all active issues/.test(q) && /problem|issue|diagnos/.test(q)) {
-      actions.push({
-        intent: "update_problem_status",
-        patientQuery,
-        status: "Resolved",
-        allProblems: true,
-      });
-      continue;
-    }
-    if (/resolve|resolved|monitoring|pending|ruled out|active/.test(q) && /problem|diagnos|hypertension|status|fixed/.test(q)) {
-      actions.push({
-        intent: "update_problem_status",
-        patientQuery,
-        problemName: chunk,
-        status: detectStatusValue(chunk) ?? "Resolved",
-      });
-      continue;
-    }
-    if (/prescribe|give|order|send medication|send .*med/.test(q)) {
-      actions.push({
-        intent: "medication_order",
-        patientQuery,
-        medication: detectOrderMedication(chunk) ?? undefined,
-      });
-      continue;
-    }
-
-    const sections = detectRequestedFields(chunk);
-    if (sections.length > 0) {
-      actions.push({
-        intent: "show_section",
-        patientQuery: patientQuery ?? (selectedPatientId ? patients.find((p) => p.id === selectedPatientId)?.name : undefined),
-        sections,
-      });
-      continue;
-    }
-
-    if (/list|show|provide/.test(q) && /patient/.test(q)) {
-      const allergies = extractAllergyTerms(q);
-      if (allergies.length > 0) {
-        actions.push({
-          intent: "allergy_search",
-          sex: /male/.test(q) ? "M" : /female/.test(q) ? "F" : undefined,
-          pediatric: /pediatric|peds|child/.test(q),
-          allergies,
-        });
-      } else {
-        actions.push({
-          intent: "list_patients",
-          sex: /male/.test(q) ? "M" : /female/.test(q) ? "F" : undefined,
-          pediatric: /pediatric|peds|child/.test(q),
-        });
-      }
-    }
-  }
-  return actions;
-}
-
 /* ──────────────────────────────────────────────────────────────────────────
  * Page
  * ────────────────────────────────────────────────────────────────────────── */
@@ -790,16 +657,10 @@ export default function VitalOsClient() {
   );
   const [isChartLoading, setIsChartLoading] = React.useState(false);
   const [pendingOrders, setPendingOrders] = React.useState<PendingOrder[]>([]);
-  const [dischargedPatients, setDischargedPatients] = React.useState<
-    Record<string, DischargedRecord>
-  >({});
-  const [dischargedPatientIds, setDischargedPatientIds] = React.useState<string[]>([]);
-  const [editableProblems, setEditableProblems] = React.useState<
+  const [problemStateByPatient, setProblemStateByPatient] = React.useState<
     Record<string, EditableProblem[]>
   >({});
   const [orderNotice, setOrderNotice] = React.useState<string | null>(null);
-  const [searchResults, setSearchResults] = React.useState<DemoPatient[]>([]);
-  const [searchResultsTitle, setSearchResultsTitle] = React.useState<string>("");
   const [openPatientTabIds, setOpenPatientTabIds] = React.useState<string[]>([]);
   const [requestedPatientView, setRequestedPatientView] =
     React.useState<RequestedPatientView | null>(null);
@@ -817,26 +678,6 @@ export default function VitalOsClient() {
   const [voiceEnabled, setVoiceEnabled] = React.useState(true);
   const [supportsSpeech, setSupportsSpeech] = React.useState(true);
   const [supportsTts, setSupportsTts] = React.useState(true);
-  const [themeMode, setThemeMode] = React.useState<ThemeMode>("light");
-  const [systemPrefersDark, setSystemPrefersDark] = React.useState(false);
-  const [micSensitivity, setMicSensitivity] = React.useState(62);
-  const [speechRateSetting, setSpeechRateSetting] = React.useState(104);
-  const [assistantVoice, setAssistantVoice] = React.useState("Clinical Voice A");
-  const [muteAssistant, setMuteAssistant] = React.useState(false);
-  const [autoOpenChartData, setAutoOpenChartData] = React.useState(true);
-  const [autoScrollToRequested, setAutoScrollToRequested] = React.useState(true);
-  const [medicationWorkflowAnimations, setMedicationWorkflowAnimations] = React.useState(true);
-  const [deliveryNotificationsEnabled, setDeliveryNotificationsEnabled] = React.useState(true);
-  const [compactDashboardMode, setCompactDashboardMode] = React.useState(false);
-  const [persistentPatientPanels, setPersistentPatientPanels] = React.useState(true);
-  const [highRiskAlerts, setHighRiskAlerts] = React.useState(true);
-  const [criticalLabAlerts, setCriticalLabAlerts] = React.useState(true);
-  const [voiceConfirmationsEnabled, setVoiceConfirmationsEnabled] = React.useState(true);
-  const [sessionNotificationsEnabled, setSessionNotificationsEnabled] = React.useState(true);
-  const [textScalePercent, setTextScalePercent] = React.useState(100);
-  const [reducedMotionMode, setReducedMotionMode] = React.useState(false);
-  const [highContrastMode, setHighContrastMode] = React.useState(false);
-  const [largerTouchTargets, setLargerTouchTargets] = React.useState(false);
   const [now, setNow] = React.useState(() => Date.now());
   const [workspaceOpen, setWorkspaceOpen] = React.useState(false);
   const [workspaceTab, setWorkspaceTab] = React.useState<
@@ -872,17 +713,7 @@ export default function VitalOsClient() {
   const lastBargeAtRef = React.useRef(0);
   const voiceHeroRef = React.useRef<VoiceHeroVisualHandle>(null);
   const speakRef = React.useRef<(text: string) => void>(() => {});
-  const speakResponseRef = React.useRef<(text: string) => void>(() => {});
   const requestedCardRef = React.useRef<HTMLDivElement | null>(null);
-  const orderDismissTimersRef = React.useRef<
-    Record<string, ReturnType<typeof setTimeout>>
-  >({});
-  const orderRemoveTimersRef = React.useRef<
-    Record<string, ReturnType<typeof setTimeout>>
-  >({});
-  const resolvedTheme = themeMode === "system"
-    ? (systemPrefersDark ? "dark" : "light")
-    : themeMode;
 
   const refreshPatients = React.useCallback(async () => {
     try {
@@ -909,100 +740,6 @@ export default function VitalOsClient() {
     const t = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(t);
   }, []);
-
-  React.useEffect(() => {
-    if (typeof window === "undefined") return;
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const apply = () => setSystemPrefersDark(media.matches);
-    apply();
-    media.addEventListener("change", apply);
-    return () => media.removeEventListener("change", apply);
-  }, []);
-
-  React.useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const raw = window.localStorage.getItem("vital-os-settings");
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as Partial<Record<string, unknown>>;
-      if (parsed.themeMode === "light" || parsed.themeMode === "dark" || parsed.themeMode === "system") {
-        setThemeMode(parsed.themeMode);
-      }
-      if (typeof parsed.micSensitivity === "number") setMicSensitivity(parsed.micSensitivity);
-      if (typeof parsed.speechRateSetting === "number") setSpeechRateSetting(parsed.speechRateSetting);
-      if (typeof parsed.assistantVoice === "string") setAssistantVoice(parsed.assistantVoice);
-      if (typeof parsed.autoOpenChartData === "boolean") setAutoOpenChartData(parsed.autoOpenChartData);
-      if (typeof parsed.autoScrollToRequested === "boolean") setAutoScrollToRequested(parsed.autoScrollToRequested);
-      if (typeof parsed.medicationWorkflowAnimations === "boolean") setMedicationWorkflowAnimations(parsed.medicationWorkflowAnimations);
-      if (typeof parsed.deliveryNotificationsEnabled === "boolean") setDeliveryNotificationsEnabled(parsed.deliveryNotificationsEnabled);
-      if (typeof parsed.compactDashboardMode === "boolean") setCompactDashboardMode(parsed.compactDashboardMode);
-      if (typeof parsed.persistentPatientPanels === "boolean") setPersistentPatientPanels(parsed.persistentPatientPanels);
-      if (typeof parsed.highRiskAlerts === "boolean") setHighRiskAlerts(parsed.highRiskAlerts);
-      if (typeof parsed.criticalLabAlerts === "boolean") setCriticalLabAlerts(parsed.criticalLabAlerts);
-      if (typeof parsed.voiceConfirmationsEnabled === "boolean") setVoiceConfirmationsEnabled(parsed.voiceConfirmationsEnabled);
-      if (typeof parsed.sessionNotificationsEnabled === "boolean") setSessionNotificationsEnabled(parsed.sessionNotificationsEnabled);
-      if (typeof parsed.textScalePercent === "number") setTextScalePercent(parsed.textScalePercent);
-      if (typeof parsed.reducedMotionMode === "boolean") setReducedMotionMode(parsed.reducedMotionMode);
-      if (typeof parsed.highContrastMode === "boolean") setHighContrastMode(parsed.highContrastMode);
-      if (typeof parsed.largerTouchTargets === "boolean") setLargerTouchTargets(parsed.largerTouchTargets);
-      // Always start each demo session with voice output enabled.
-      setMuteAssistant(false);
-    } catch {
-      /* ignore malformed local settings */
-    }
-  }, []);
-
-  React.useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(
-      "vital-os-settings",
-      JSON.stringify({
-        themeMode,
-        micSensitivity,
-        speechRateSetting,
-        assistantVoice,
-        muteAssistant,
-        autoOpenChartData,
-        autoScrollToRequested,
-        medicationWorkflowAnimations,
-        deliveryNotificationsEnabled,
-        compactDashboardMode,
-        persistentPatientPanels,
-        highRiskAlerts,
-        criticalLabAlerts,
-        voiceConfirmationsEnabled,
-        sessionNotificationsEnabled,
-        textScalePercent,
-        reducedMotionMode,
-        highContrastMode,
-        largerTouchTargets,
-      })
-    );
-  }, [
-    themeMode,
-    micSensitivity,
-    speechRateSetting,
-    assistantVoice,
-    muteAssistant,
-    autoOpenChartData,
-    autoScrollToRequested,
-    medicationWorkflowAnimations,
-    deliveryNotificationsEnabled,
-    compactDashboardMode,
-    persistentPatientPanels,
-    highRiskAlerts,
-    criticalLabAlerts,
-    voiceConfirmationsEnabled,
-    sessionNotificationsEnabled,
-    textScalePercent,
-    reducedMotionMode,
-    highContrastMode,
-    largerTouchTargets,
-  ]);
-
-  React.useEffect(() => {
-    setVoiceEnabled(!muteAssistant);
-  }, [muteAssistant]);
 
   React.useEffect(() => {
     systemStateRef.current = systemState;
@@ -1063,13 +800,7 @@ export default function VitalOsClient() {
   }, [selectedPatientId, patients]);
 
   React.useEffect(() => {
-    if (!selectedPatientId) return;
-    if (!dischargedPatientIds.includes(selectedPatientId)) return;
-    setSelectedPatientId(null);
-  }, [dischargedPatientIds, selectedPatientId]);
-
-  React.useEffect(() => {
-    setEditableProblems((prev) => {
+    setProblemStateByPatient((prev) => {
       const next = { ...prev };
       for (const patient of patients) {
         if (next[patient.id]?.length) continue;
@@ -1095,17 +826,17 @@ export default function VitalOsClient() {
               if (item.id !== order.id) return item;
               const nextIndex = Math.min(item.stepIndex + 1, ORDER_WORKFLOW_STEPS.length - 1);
               const nextStatus = ORDER_WORKFLOW_STEPS[nextIndex].status;
-              if (nextStatus === "Ready for Pickup" && deliveryNotificationsEnabled) {
+              if (nextStatus === "Ready for Pickup") {
                 setOrderNotice("Pharmacy preparation complete.");
               }
-              if (nextStatus === "Nurse Assigned" && deliveryNotificationsEnabled) {
+              if (nextStatus === "Nurse Assigned") {
                 setOrderNotice(`Nurse assigned: ${item.nurseName}.`);
               }
               if (nextStatus === "Delivered") {
-                if (deliveryNotificationsEnabled) {
-                  setOrderNotice(`Medication delivered successfully to ${item.room}.`);
+                setOrderNotice(`Medication delivered successfully to ${item.room}.`);
+                if (voiceEnabled && supportsTts) {
+                  speakRef.current(`Medication delivered to ${item.room}.`);
                 }
-                speakResponseRef.current(`Medication delivered to ${item.room}.`);
               }
               return {
                 ...item,
@@ -1122,65 +853,7 @@ export default function VitalOsClient() {
         globalThis.clearTimeout(timer);
       }
     };
-  }, [deliveryNotificationsEnabled, pendingOrders]);
-
-  React.useEffect(() => {
-    for (const order of pendingOrders) {
-      if (order.status !== "Delivered" || order.isClosing) continue;
-      if (orderDismissTimersRef.current[order.id]) continue;
-      orderDismissTimersRef.current[order.id] = globalThis.setTimeout(() => {
-        setPendingOrders((prev) =>
-          prev.map((item) =>
-            item.id === order.id
-              ? { ...item, isClosing: true, closingStartedAt: Date.now() }
-              : item
-          )
-        );
-        delete orderDismissTimersRef.current[order.id];
-      }, 5000);
-    }
-
-    return () => {
-      for (const [id, timer] of Object.entries(orderDismissTimersRef.current)) {
-        if (!pendingOrders.some((o) => o.id === id && o.status === "Delivered" && !o.isClosing)) {
-          globalThis.clearTimeout(timer);
-          delete orderDismissTimersRef.current[id];
-        }
-      }
-    };
-  }, [pendingOrders]);
-
-  React.useEffect(() => {
-    for (const order of pendingOrders) {
-      if (!order.isClosing) continue;
-      if (orderRemoveTimersRef.current[order.id]) continue;
-      orderRemoveTimersRef.current[order.id] = globalThis.setTimeout(() => {
-        setPendingOrders((prev) => prev.filter((item) => item.id !== order.id));
-        delete orderRemoveTimersRef.current[order.id];
-      }, 800);
-    }
-
-    return () => {
-      for (const [id, timer] of Object.entries(orderRemoveTimersRef.current)) {
-        if (!pendingOrders.some((o) => o.id === id && o.isClosing)) {
-          globalThis.clearTimeout(timer);
-          delete orderRemoveTimersRef.current[id];
-        }
-      }
-    };
-  }, [pendingOrders]);
-
-  React.useEffect(
-    () => () => {
-      Object.values(orderDismissTimersRef.current).forEach((timer) =>
-        globalThis.clearTimeout(timer)
-      );
-      Object.values(orderRemoveTimersRef.current).forEach((timer) =>
-        globalThis.clearTimeout(timer)
-      );
-    },
-    []
-  );
+  }, [pendingOrders, supportsTts, voiceEnabled]);
 
   React.useEffect(() => {
     if (!orderNotice) return;
@@ -1675,106 +1348,11 @@ export default function VitalOsClient() {
           ...prev,
         ].slice(0, 180)
       );
-      speakResponseRef.current(text);
-    },
-    []
-  );
-
-  const updateProblemStatus = React.useCallback(
-    (patientId: string, problemName: string, newStatus: ProblemStatus): EditableProblem | null => {
-      let updated: EditableProblem | null = null;
-      setEditableProblems((prev) => {
-        const list = prev[patientId] ?? [];
-        const normalizedProblem = normalizeProblemKey(problemName);
-        const nextList = list.map((item) => {
-          const match =
-            normalizeProblemKey(item.name).includes(normalizedProblem) ||
-            normalizedProblem.includes(normalizeProblemKey(item.name));
-          if (!match) return item;
-          updated = { ...item, status: newStatus };
-          return updated;
-        });
-        console.log("[VITAL COMMAND] updated editableProblems:", {
-          patientId,
-          problemName,
-          newStatus,
-          matched: Boolean(updated),
-        });
-        return { ...prev, [patientId]: nextList };
-      });
-      return updated;
-    },
-    []
-  );
-
-  const dischargePatient = React.useCallback((patient: DemoPatient) => {
-    console.log("[VITAL COMMAND] discharge patient:", patient.name, patient.id);
-    setDischargedPatients((prev) => ({
-      ...prev,
-      [patient.id]: {
-        patientId: patient.id,
-        patientName: patient.name,
-        room: patient.room,
-        dischargedAt: Date.now(),
-        status: "Completed",
-      },
-    }));
-    setDischargedPatientIds((prev) => (prev.includes(patient.id) ? prev : [...prev, patient.id]));
-    setOpenPatientTabIds((prev) => prev.filter((id) => id !== patient.id));
-    if (selectedPatientId === patient.id) {
-      setRequestedPatientView(null);
-      setActiveRequestedSections([]);
-      setSelectedPatientId(null);
-    }
-  }, [selectedPatientId]);
-
-  const restorePatient = React.useCallback((patient: DemoPatient) => {
-    console.log("[VITAL COMMAND] restore patient:", patient.name, patient.id);
-    setDischargedPatients((prev) => {
-      const next = { ...prev };
-      delete next[patient.id];
-      return next;
-    });
-    setDischargedPatientIds((prev) => prev.filter((id) => id !== patient.id));
-  }, []);
-
-  const resetSettingsToDefaults = React.useCallback(() => {
-    setThemeMode("light");
-    setMicSensitivity(62);
-    setSpeechRateSetting(104);
-    setAssistantVoice("Clinical Voice A");
-    setMuteAssistant(false);
-    setAutoOpenChartData(true);
-    setAutoScrollToRequested(true);
-    setMedicationWorkflowAnimations(true);
-    setDeliveryNotificationsEnabled(true);
-    setCompactDashboardMode(false);
-    setPersistentPatientPanels(true);
-    setHighRiskAlerts(true);
-    setCriticalLabAlerts(true);
-    setVoiceConfirmationsEnabled(true);
-    setSessionNotificationsEnabled(true);
-    setTextScalePercent(100);
-    setReducedMotionMode(false);
-    setHighContrastMode(false);
-    setLargerTouchTargets(false);
-    setOrderNotice("Settings reset to defaults.");
-  }, []);
-
-  const runPatientSearch = React.useCallback(
-    (opts: { sex?: "M" | "F"; pediatric?: boolean; allergies?: string[] }) => {
-      let out = patients.filter((p) => !dischargedPatientIds.includes(p.id));
-      if (opts.sex) out = out.filter((p) => p.sex.toUpperCase().startsWith(opts.sex!));
-      if (opts.pediatric) out = out.filter((p) => p.age < 18 || /^peds/i.test(p.room));
-      if (opts.allergies?.length) {
-        out = out.filter((p) => {
-          const allergiesText = p.allergies.join(" ").toLowerCase();
-          return opts.allergies!.every((a) => allergiesText.includes(a.toLowerCase()));
-        });
+      if (voiceEnabled && supportsTts) {
+        speakRef.current(text);
       }
-      return out;
     },
-    [dischargedPatientIds, patients]
+    [supportsTts, voiceEnabled]
   );
 
   const openRequestedView = React.useCallback(
@@ -1784,25 +1362,15 @@ export default function VitalOsClient() {
         prev.includes(patient.id) ? prev : [...prev, patient.id].slice(-5)
       );
       setActiveRequestedSections(sections);
-      if (!autoOpenChartData) {
-        return;
-      }
       setIsChartLoading(true);
-      await new Promise<void>((resolve) =>
-        setTimeout(() => resolve(), reducedMotionMode ? 80 : 360)
-      );
+      await new Promise<void>((resolve) => setTimeout(() => resolve(), 360));
       setRequestedPatientView(buildRequestedPatientView(patient, sections));
       setIsChartLoading(false);
-      if (autoScrollToRequested) {
-        globalThis.setTimeout(() => {
-          requestedCardRef.current?.scrollIntoView({
-            behavior: reducedMotionMode ? "auto" : "smooth",
-            block: "start",
-          });
-        }, 40);
-      }
+      globalThis.setTimeout(() => {
+        requestedCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 40);
     },
-    [autoOpenChartData, autoScrollToRequested, reducedMotionMode]
+    []
   );
 
   const handleClinicalCommand = React.useCallback(
@@ -1812,219 +1380,22 @@ export default function VitalOsClient() {
       setLastCommand(command);
       const lower = command.toLowerCase();
 
-      console.log("[VITAL COMMAND] input:", command);
-
-      const parsedActions = parseCommand(command, patients, selectedPatientId);
-      console.log("[VITAL COMMAND] parsed intents:", parsedActions);
-      if (parsedActions.length > 0) {
-        const outputs: string[] = [];
-        for (const action of parsedActions) {
-          if (action.intent === "end_session") {
-            resetSession();
-            outputs.push("Session ended. Panels cleared.");
-            continue;
-          }
-          if (action.intent === "discharge_patient") {
-            const target =
-              (action.patientQuery && findPatientByQuery(patients, action.patientQuery)) ||
-              (selectedPatientId ? patients.find((p) => p.id === selectedPatientId) ?? null : null);
-            console.log("[VITAL COMMAND] discharge target:", target?.name ?? "none");
-            if (!target) {
-              outputs.push("Please confirm which patient should be ready for discharge.");
-              continue;
-            }
-            dischargePatient(target);
-            setOrderNotice(`${target.name} discharged from active roster.`);
-            outputs.push(
-              `Discharge workflow started. ${target.name} has been removed from the active roster for this session.`
-            );
-            continue;
-          }
-          if (action.intent === "restore_patient") {
-            const target =
-              (action.patientQuery && findPatientByQuery(patients, action.patientQuery)) || null;
-            console.log("[VITAL COMMAND] restore target:", target?.name ?? "none");
-            if (!target || !dischargedPatientIds.includes(target.id)) {
-              outputs.push("Please confirm which discharged patient to restore.");
-              continue;
-            }
-            restorePatient(target);
-            outputs.push(`${target.name} has been restored to the active roster.`);
-            continue;
-          }
-          if (action.intent === "update_problem_status") {
-            const target =
-              (action.patientQuery && findPatientByQuery(patients, action.patientQuery)) ||
-              (selectedPatientId ? patients.find((p) => p.id === selectedPatientId) ?? null : null);
-            console.log("[VITAL COMMAND] status target:", target?.name ?? "none");
-            if (!target) {
-              outputs.push("Please confirm the patient for the problem update.");
-              continue;
-            }
-            const problems = editableProblems[target.id] ?? [];
-            if (action.allProblems) {
-              setEditableProblems((prev) => ({
-                ...prev,
-                [target.id]: (prev[target.id] ?? []).map((p) => ({ ...p, status: "Resolved" })),
-              }));
-              void openRequestedView(target, ["diagnoses"]);
-              outputs.push(`All active problems for ${target.name} are now marked resolved.`);
-              continue;
-            }
-            const query = action.problemName ?? command;
-            const match = problems.find(
-              (p) =>
-                normalizeProblemKey(query).includes(normalizeProblemKey(p.name)) ||
-                normalizeProblemKey(p.name).includes(normalizeProblemKey(query))
-            );
-            console.log("[VITAL COMMAND] status problem:", match?.name ?? "none");
-            if (!match) {
-              outputs.push("Please confirm which problem should be updated.");
-              continue;
-            }
-            updateProblemStatus(target.id, match.name, action.status);
-            void openRequestedView(target, ["diagnoses"]);
-            outputs.push(
-              `Updated. ${match.name} is now marked ${action.status.toLowerCase()} for ${target.name}.`
-            );
-            continue;
-          }
-          if (action.intent === "show_section") {
-            const target =
-              (action.patientQuery && findPatientByQuery(patients, action.patientQuery)) ||
-              (selectedPatientId ? patients.find((p) => p.id === selectedPatientId) ?? null : null);
-            if (!target) {
-              outputs.push("Please confirm which patient chart to open.");
-              continue;
-            }
-            await openRequestedView(target, action.sections);
-            outputs.push(`Requested chart data displayed for ${target.name}.`);
-            continue;
-          }
-          if (action.intent === "medication_order") {
-            const target =
-              (action.patientQuery && findPatientByQuery(patients, action.patientQuery)) ||
-              (selectedPatientId ? patients.find((p) => p.id === selectedPatientId) ?? null : null);
-            if (!target || !action.medication) {
-              outputs.push("Please confirm the medication and patient.");
-              continue;
-            }
-            const medication = action.medication;
-            const nurseName = pickBySeed(MOCK_NURSES, `${target.id}-${medication}`);
-            const pharmacyStation = pickBySeed(MOCK_PHARMACY, `${medication}-${target.room}`);
-            setPendingOrders((prev) => [
-              {
-                id: uid(),
-                patientId: target.id,
-                patientName: target.name,
-                room: target.room,
-                medication,
-                status: "Order Queued" as const,
-                nurseName,
-                pharmacyStation,
-                stepIndex: 0,
-                isClosing: false,
-                createdAt: Date.now(),
-              },
-              ...prev,
-            ].slice(0, 12));
-            outputs.push(
-              `Order queued. Pharmacy notified. A nurse will deliver ${medication} to ${target.name} in ${target.room}.`
-            );
-            continue;
-          }
-          if (action.intent === "allergy_search" || action.intent === "list_patients") {
-            const matches = runPatientSearch({
-              sex: action.sex,
-              pediatric: action.pediatric,
-              allergies: action.intent === "allergy_search" ? action.allergies : undefined,
-            });
-            setSearchResults(matches);
-            setSearchResultsTitle(
-              action.intent === "allergy_search"
-                ? `Filtered allergy results (${matches.length})`
-                : `Patient list results (${matches.length})`
-            );
-            outputs.push(
-              matches.length === 0
-                ? "No matching patients found."
-                : `${matches.length} matching patient${matches.length > 1 ? "s" : ""} found.`
-            );
-            continue;
-          }
-        }
-        const responseText = outputs.join(" ");
-        if (responseText.trim()) {
-          console.log("[VITAL COMMAND] response text:", responseText);
-          pushLocalAssistantResponse(command, responseText);
-          return true;
-        }
-      }
-
       if (isResetCommand(lower) || /logout/.test(lower)) {
-        console.log("[VITAL COMMAND] intent: clear_session");
         resetSession();
         pushLocalAssistantResponse(command, "Session ended. Panels cleared.");
         return true;
       }
 
-      // 1) Discharge / restore commands (highest priority)
-      const restoreIntent = /restore|bring .* back|reopen .*chart/.test(lower);
-      if (restoreIntent) {
-        console.log("[VITAL COMMAND] intent: restore");
-        const matches = findPatientMatches(command, patients);
-        const target = matches[0] ?? null;
-        console.log("[VITAL COMMAND] detected patient:", target?.name ?? "none");
-        if (!target || !dischargedPatientIds.includes(target.id)) {
-          pushLocalAssistantResponse(command, "Please confirm which discharged patient to restore.");
-          return true;
-        }
-        restorePatient(target);
-        setOrderNotice(`${target.name} restored to active roster.`);
-        pushLocalAssistantResponse(
-          command,
-          `${target.name} has been restored to the active roster.`
-        );
-        return true;
-      }
-
-      const dischargeIntent =
-        /prepare .*discharge|ready for discharge|discharge|clear .*active roster|remove .*active patients/.test(
-          lower
-        );
-      if (dischargeIntent) {
-        console.log("[VITAL COMMAND] intent: discharge");
-        const matches = findPatientMatches(command, patients);
-        const active =
-          (selectedPatientId && patients.find((p) => p.id === selectedPatientId)) || null;
-        const target = matches[0] ?? active;
-        console.log("[VITAL COMMAND] detected patient:", target?.name ?? "none");
-        if (!target) {
-          pushLocalAssistantResponse(command, "Please confirm which patient should be ready for discharge.");
-          return true;
-        }
-        dischargePatient(target);
-        setOrderNotice(`${target.name} discharged from active roster.`);
-        pushLocalAssistantResponse(
-          command,
-          `Discharge workflow started. ${target.name} has been removed from the active roster for this session.`
-        );
-        return true;
-      }
-
-      // 2) Problem status update commands
       const statusIntent =
         /make|mark|change status|resolve|resolved|monitoring|ruled out|pending|active/i.test(
           command
         ) && /diagnos|problem|status|hypertension|condition|fixed/i.test(command);
       if (statusIntent) {
-        console.log("[VITAL COMMAND] intent: update_problem_status");
         const status = detectStatusValue(command);
         const matches = findPatientMatches(command, patients);
         const active =
           (selectedPatientId && patients.find((p) => p.id === selectedPatientId)) || null;
         const target = matches[0] ?? active;
-        console.log("[VITAL COMMAND] detected patient:", target?.name ?? "none");
         if (!target || !status) {
           pushLocalAssistantResponse(
             command,
@@ -2035,7 +1406,7 @@ export default function VitalOsClient() {
         const explicitProblem = command.match(
           /(?:for|status for|mark|make|resolve)\s+(.+?)\s+(?:as|to)\s+(?:active|resolved|monitoring|pending|ruled out)/i
         )?.[1];
-        const existingProblems = editableProblems[target.id] ?? [];
+        const existingProblems = problemStateByPatient[target.id] ?? [];
         const problem = explicitProblem
           ? existingProblems.find((d) =>
               normalizeProblemKey(d.name).includes(normalizeProblemKey(explicitProblem))
@@ -2049,8 +1420,12 @@ export default function VitalOsClient() {
           pushLocalAssistantResponse(command, "Please confirm which problem should be updated.");
           return true;
         }
-        console.log("[VITAL COMMAND] detected problem:", problem.name, "=>", status);
-        updateProblemStatus(target.id, problem.name, status);
+        setProblemStateByPatient((prev) => ({
+          ...prev,
+          [target.id]: (prev[target.id] ?? []).map((item) =>
+            item.id === problem.id ? { ...item, status } : item
+          ),
+        }));
         if (selectedPatientId !== target.id) {
           setSelectedPatientId(target.id);
         }
@@ -2062,56 +1437,49 @@ export default function VitalOsClient() {
         return true;
       }
 
-      // 3) Section chart requests
-      const action = parseVoiceCommand(command, patients, selectedPatientId);
-      if (action.kind === "none") {
-        // 4) Medication workflow commands
-        const orderIntent = /prescribe|give|order|send medication|send .*med/i.test(lower);
-        if (orderIntent) {
-          console.log("[VITAL COMMAND] intent: medication_workflow");
-          const medication = detectOrderMedication(command);
-          const matches = findPatientMatches(command, patients);
-          const active =
-            (selectedPatientId && patients.find((p) => p.id === selectedPatientId)) || null;
-          const target = matches[0] ?? active;
-          console.log("[VITAL COMMAND] detected patient:", target?.name ?? "none");
-          console.log("[VITAL COMMAND] detected medication:", medication ?? "none");
-          if (!target || !medication) {
-            pushLocalAssistantResponse(command, "Please confirm the medication and patient.");
-            return true;
-          }
-          const nurseName = pickBySeed(MOCK_NURSES, `${target.id}-${medication}`);
-          const pharmacyStation = pickBySeed(MOCK_PHARMACY, `${medication}-${target.room}`);
-          setPendingOrders((prev) => [
-            {
-              id: uid(),
-              patientId: target.id,
-              patientName: target.name,
-              room: target.room,
-              medication,
-              status: "Order Queued" as const,
-              nurseName,
-              pharmacyStation,
-              stepIndex: 0,
-              isClosing: false,
-              createdAt: Date.now(),
-            },
-            ...prev,
-          ].slice(0, 12));
-          if (selectedPatientId !== target.id) {
-            setSelectedPatientId(target.id);
-          }
-          if (!activeRequestedSections.includes("medications")) {
-            setActiveRequestedSections((prev) => [...prev, "medications"]);
-          }
-          pushLocalAssistantResponse(
-            command,
-            `Order queued. Pharmacy notified. A nurse will deliver ${medication} to ${target.name} in ${target.room}.`
-          );
+      const orderIntent = /prescribe|give|order|send medication|send .*med/i.test(lower);
+      if (orderIntent) {
+        const medication = detectOrderMedication(command);
+        const matches = findPatientMatches(command, patients);
+        const active =
+          (selectedPatientId && patients.find((p) => p.id === selectedPatientId)) || null;
+        const target = matches[0] ?? active;
+        if (!target || !medication) {
+          pushLocalAssistantResponse(command, "Please confirm the medication and patient.");
           return true;
         }
-        return false;
+        const nurseName = pickBySeed(MOCK_NURSES, `${target.id}-${medication}`);
+        const pharmacyStation = pickBySeed(MOCK_PHARMACY, `${medication}-${target.room}`);
+        setPendingOrders((prev) => [
+          {
+            id: uid(),
+            patientId: target.id,
+            patientName: target.name,
+            room: target.room,
+            medication,
+            status: "Order Queued" as const,
+            nurseName,
+            pharmacyStation,
+            stepIndex: 0,
+            createdAt: Date.now(),
+          },
+          ...prev,
+        ].slice(0, 12));
+        if (selectedPatientId !== target.id) {
+          setSelectedPatientId(target.id);
+        }
+        if (!activeRequestedSections.includes("medications")) {
+          setActiveRequestedSections((prev) => [...prev, "medications"]);
+        }
+        pushLocalAssistantResponse(
+          command,
+          `Order queued. Pharmacy notified. A nurse will deliver ${medication} to ${target.name} in ${target.room}.`
+        );
+        return true;
       }
+
+      const action = parseVoiceCommand(command, patients, selectedPatientId);
+      if (action.kind === "none") return false;
       if (action.kind === "clear_session") {
         resetSession();
         pushLocalAssistantResponse(command, "Session ended. Panels cleared.");
@@ -2140,7 +1508,7 @@ export default function VitalOsClient() {
         ? `Vitals displayed for ${patient.name}.`
         : lower.includes("allerg")
           ? `Allergies displayed for ${patient.name}.`
-        : lower.includes("med")
+          : lower.includes("med")
             ? `Medications displayed for ${patient.name}.`
             : `Chart data displayed for ${patient.name}.`;
       pushLocalAssistantResponse(command, spoken);
@@ -2148,16 +1516,11 @@ export default function VitalOsClient() {
     },
     [
       patients,
-      dischargedPatientIds,
       selectedPatientId,
       resetSession,
       activeRequestedSections,
       openRequestedView,
       pushLocalAssistantResponse,
-      editableProblems,
-      updateProblemStatus,
-      dischargePatient,
-      restorePatient,
     ]
   );
 
@@ -2247,7 +1610,7 @@ export default function VitalOsClient() {
         );
 
         if (voiceEnabled && supportsTts) {
-          speakResponseRef.current(ok.text);
+          speak(ok.text);
         } else {
           setSystemState("idle");
           if (voiceSessionActiveRef.current) {
@@ -2329,35 +1692,49 @@ export default function VitalOsClient() {
       /* noop — some engines throw if nothing paused */
     }
 
-    const pickVoice = () => {
+    /** Prefer a natural female English voice for VITAL AI responses (cross-browser heuristic). */
+    const pickFemaleVoice = (): SpeechSynthesisVoice | undefined => {
       const voices = window.speechSynthesis.getVoices();
-      const preferred =
-        assistantVoice === "Clinical Voice B"
-          ? voices.find((v) => /Aria|Jenny|Google UK/i.test(v.name))
-          : assistantVoice === "Clinical Voice C"
-            ? voices.find((v) => /Guy|Mark|David|Microsoft/i.test(v.name))
-            : voices.find((v) => /Google US English|Zira|Natural/i.test(v.name));
-      if (preferred) return preferred;
-      return (
-        voices.find((v) => /Google US English/i.test(v.name)) ||
-        voices.find(
-          (v) =>
-            /Microsoft|Google|Natural|Aria|Jenny|Guy|Zira|Mark/i.test(v.name) &&
-            /en(-US)?/i.test(v.lang)
-        ) ||
-        voices.find((v) => v.lang === "en-US") ||
-        voices.find((v) => v.default && /^en/i.test(v.lang)) ||
-        voices.find((v) => /^en/i.test(v.lang))
-      );
+      if (!voices.length) return undefined;
+
+      const en = voices.filter((v) => /^en/i.test(v.lang));
+      const isLikelyMale = (name: string) =>
+        /\b(male|guy|^mark|^fred|^david|^tom|^john|^james|^paul|^rick|ravi|zak|george|^dan\b)\b/i.test(
+          name
+        );
+
+      const femaleNameHints =
+        /\b(Aria|Jenny|Zira|Samantha|Victoria|Susan|Sonia|Amy|Karen|Emma|Linda|Sara|Lisa|Jennifer|Tessa|Evelyn|Nova|Sophia|Elizabeth|Female|Women|Woman)\b|^Google .*Female/i;
+
+      const scored = en.map((v) => {
+        let score = 0;
+        if (isLikelyMale(v.name)) score -= 300;
+        const nameOk = femaleNameHints.test(v.name) && !isLikelyMale(v.name);
+        if (nameOk) score += 500;
+        if (/\b(Aria|Jenny|Zira)\b/i.test(v.name) && !isLikelyMale(v.name)) score += 120;
+        if (/en-US/i.test(v.lang)) score += 80;
+        if (/Microsoft/i.test(v.name)) score += 40;
+        if (/Google/i.test(v.name)) score += 40;
+        if (v.localService) score += 15;
+        return { v, score };
+      });
+      scored.sort((a, b) => b.score - a.score);
+
+      const best =
+        scored.find((entry) => entry.score > 0)?.v ||
+        voices.find((v) => /^en-US/i.test(v.lang) && !isLikelyMale(v.name)) ||
+        voices.find((v) => /^en/i.test(v.lang));
+
+      return best ?? voices[0];
     };
 
     const play = () => {
       const u = new SpeechSynthesisUtterance(line);
       u.lang = "en-US";
-      u.rate = Math.max(0.75, Math.min(1.35, speechRateSetting / 100));
+      u.rate = 1.04;
       u.pitch = 1.03;
       u.volume = 1;
-      const voice = pickVoice();
+      const voice = pickFemaleVoice();
       if (voice) u.voice = voice;
 
       u.onstart = () => {
@@ -2415,34 +1792,11 @@ export default function VitalOsClient() {
     };
     window.speechSynthesis.addEventListener("voiceschanged", run);
     globalThis.setTimeout(run, 350);
-  }, [assistantVoice, speechRateSetting]);
+  }, []);
 
   React.useEffect(() => {
     speakRef.current = speak;
   }, [speak]);
-
-  const speakResponse = React.useCallback(
-    (text: string) => {
-      const line = text.trim();
-      if (!line) return;
-      if (!supportsTts) {
-        setOrderNotice("Voice output unavailable in this browser.");
-        return;
-      }
-      const allowSpeech = !muteAssistant || voiceSessionLive;
-      if (!allowSpeech || !voiceEnabled) return;
-      try {
-        speakRef.current(line);
-      } catch (err) {
-        console.error("VITAL OS TTS failed:", err);
-      }
-    },
-    [supportsTts, muteAssistant, voiceSessionLive, voiceEnabled]
-  );
-
-  React.useEffect(() => {
-    speakResponseRef.current = speakResponse;
-  }, [speakResponse]);
 
   const stopSpeaking = React.useCallback(() => {
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
@@ -2581,86 +1935,60 @@ export default function VitalOsClient() {
     systemState === "processing" ||
     systemState === "listening" ||
     systemState === "speaking";
-  const activePatients = React.useMemo(
-    () => patients.filter((p) => !dischargedPatientIds.includes(p.id)),
-    [patients, dischargedPatientIds]
-  );
-  const dischargedList = React.useMemo(
-    () => Object.values(dischargedPatients).sort((a, b) => b.dischargedAt - a.dischargedAt),
-    [dischargedPatients]
-  );
-  const activePatient = activePatients.find((p) => p.id === selectedPatientId) ?? null;
+  const activePatient = patients.find((p) => p.id === selectedPatientId) ?? null;
   const activeVitals = activePatient ? Object.entries(activePatient.vitals) : [];
   const activeMeds = activePatient?.medications ?? [];
   const activeAllergies = activePatient?.allergies ?? [];
   const activeProblems = activePatient?.diagnoses ?? [];
   const activeProblemRows = React.useMemo(
-    () => (activePatient ? editableProblems[activePatient.id] ?? [] : []),
-    [activePatient, editableProblems]
+    () => (activePatient ? problemStateByPatient[activePatient.id] ?? [] : []),
+    [activePatient, problemStateByPatient]
   );
   const activeProblemCount = React.useMemo(
     () => activeProblemRows.filter((item) => item.status === "Active").length,
     [activeProblemRows]
   );
-  const highAcuityPatients = React.useMemo(
-    () => getHighAcuityPatients(activePatients),
-    [activePatients]
-  );
+  const highAcuityPatients = React.useMemo(() => getHighAcuityPatients(patients), [patients]);
   const patientsWithAllergies = React.useMemo(
-    () => getPatientsWithAllergies(activePatients),
-    [activePatients]
+    () => getPatientsWithAllergies(patients),
+    [patients]
   );
-  const pendingLabsPatients = React.useMemo(
-    () => getPendingLabs(activePatients),
-    [activePatients]
-  );
-  const imagingOrderedPatients = React.useMemo(
-    () => getImagingOrdered(activePatients),
-    [activePatients]
-  );
+  const pendingLabsPatients = React.useMemo(() => getPendingLabs(patients), [patients]);
+  const imagingOrderedPatients = React.useMemo(() => getImagingOrdered(patients), [patients]);
   const consultRequestedPatients = React.useMemo(
-    () => getConsultRequested(activePatients),
-    [activePatients]
+    () => getConsultRequested(patients),
+    [patients]
   );
   const pediatricPatients = React.useMemo(
-    () => activePatients.filter((p) => isPediatric(p)),
-    [activePatients]
+    () => patients.filter((p) => isPediatric(p)),
+    [patients]
   );
-  const acuityDistribution = React.useMemo(
-    () => getAcuityDistribution(activePatients),
-    [activePatients]
-  );
-  const ageDistribution = React.useMemo(
-    () => getAgeDistribution(activePatients),
-    [activePatients]
-  );
-  const unitDistribution = React.useMemo(
-    () => getUnitDistribution(activePatients),
-    [activePatients]
-  );
+  const acuityDistribution = React.useMemo(() => getAcuityDistribution(patients), [patients]);
+  const ageDistribution = React.useMemo(() => getAgeDistribution(patients), [patients]);
+  const unitDistribution = React.useMemo(() => getUnitDistribution(patients), [patients]);
   const topConcernCategories = React.useMemo(
-    () => getTopConcernCategories(activePatients),
-    [activePatients]
+    () => getTopConcernCategories(patients),
+    [patients]
   );
   const riskDistribution = React.useMemo(
-    () => getRiskCategoryDistribution(activePatients),
-    [activePatients]
+    () => getRiskCategoryDistribution(patients),
+    [patients]
   );
   const medicationsCount = React.useMemo(
-    () => activePatients.reduce((sum, p) => sum + p.medications.length, 0),
-    [activePatients]
+    () => patients.reduce((sum, p) => sum + p.medications.length, 0),
+    [patients]
   );
   const roomOccupancy = React.useMemo(
     () =>
-      [...activePatients]
+      [...patients]
         .sort((a, b) => a.room.localeCompare(b.room))
         .map((p) => ({ room: p.room, patient: p.name, acuity: p.triageAcuity }))
         .slice(0, 10),
-    [activePatients]
+    [patients]
   );
   const encounterRows = React.useMemo(
     () =>
-      activePatients.map((p, idx) => {
+      patients.map((p, idx) => {
         const status = deriveEncounterStatus(p);
         const ts = new Date();
         ts.setMinutes(ts.getMinutes() - idx * 9);
@@ -2670,7 +1998,7 @@ export default function VitalOsClient() {
           updatedLabel: ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         };
       }),
-    [activePatients]
+    [patients]
   );
   const filteredEncounters = React.useMemo(() => {
     switch (encounterFilter) {
@@ -2690,14 +2018,14 @@ export default function VitalOsClient() {
   }, [encounterFilter, encounterRows]);
   const shiftTrend = React.useMemo(
     () => [
-      { label: "08:00", value: Math.max(2, Math.round(activePatients.length * 0.45)) },
-      { label: "10:00", value: Math.max(2, Math.round(activePatients.length * 0.62)) },
-      { label: "12:00", value: Math.max(2, Math.round(activePatients.length * 0.76)) },
-      { label: "14:00", value: Math.max(2, Math.round(activePatients.length * 0.84)) },
-      { label: "16:00", value: Math.max(2, Math.round(activePatients.length * 0.92)) },
-      { label: "18:00", value: activePatients.length },
+      { label: "08:00", value: Math.max(2, Math.round(patients.length * 0.45)) },
+      { label: "10:00", value: Math.max(2, Math.round(patients.length * 0.62)) },
+      { label: "12:00", value: Math.max(2, Math.round(patients.length * 0.76)) },
+      { label: "14:00", value: Math.max(2, Math.round(patients.length * 0.84)) },
+      { label: "16:00", value: Math.max(2, Math.round(patients.length * 0.92)) },
+      { label: "18:00", value: patients.length },
     ],
-    [activePatients.length]
+    [patients.length]
   );
   const unitDonut = React.useMemo(() => {
     const total = unitDistribution.reduce((sum, item) => sum + item.value, 0);
@@ -2714,7 +2042,7 @@ export default function VitalOsClient() {
   }, [unitDistribution]);
   const activityFeed = React.useMemo(
     () =>
-      activePatients.slice(0, 8).map((p, idx) => {
+      patients.slice(0, 8).map((p, idx) => {
         const base =
           p.cardiacStudies && /ordered|ecg|ct/i.test(p.cardiacStudies)
             ? `${p.cardiacStudies} for ${p.name}.`
@@ -2729,7 +2057,7 @@ export default function VitalOsClient() {
           level: /stroke|anaphylaxis|critical|acs|sepsis|code/i.test(base) ? "high" : "normal",
         };
       }),
-    [activePatients]
+    [patients]
   );
   const fullChartSections: PatientFieldKey[] = [
     "overview",
@@ -2744,7 +2072,7 @@ export default function VitalOsClient() {
   const showSection = (key: PatientFieldKey) =>
     activeRequestedSections.includes("overview") || activeRequestedSections.includes(key);
   const hasRequestedSections = activeRequestedSections.length > 0;
-  const filteredPatients = activePatients.filter((p) => {
+  const filteredPatients = patients.filter((p) => {
     const q = patientSearch.trim().toLowerCase();
     if (!q) return true;
     return (
@@ -2756,19 +2084,7 @@ export default function VitalOsClient() {
   });
 
   return (
-    <main
-      className={cn(
-        "min-h-screen text-slate-900 transition-colors duration-300",
-        resolvedTheme === "dark" ? "bg-slate-950 text-slate-100" : "bg-[#f7fbff]",
-        resolvedTheme === "dark" &&
-          "[&_.bg-white]:bg-slate-900 [&_.bg-slate-50]:bg-slate-800/60 [&_.text-slate-900]:text-slate-100 [&_.text-slate-700]:text-slate-200 [&_.text-slate-600]:text-slate-300 [&_.border-\\[\\#e3edf9\\]]:border-slate-700 [&_.border-slate-200]:border-slate-700 [&_.shadow-sm]:shadow-[0_8px_24px_-12px_rgba(0,0,0,0.6)]",
-        reducedMotionMode && "[&_*]:!transition-none [&_*]:!animate-none",
-        highContrastMode && "[&_*]:!border-opacity-100 [&_.text-slate-500]:!text-slate-300",
-        largerTouchTargets && "[&_button]:min-h-[42px] [&_button]:px-3",
-        compactDashboardMode && "[&_.p-4]:p-3 [&_.mt-3]:mt-2"
-      )}
-      style={{ fontSize: `${textScalePercent}%` }}
-    >
+    <main className="min-h-screen bg-[#f7fbff] text-slate-900">
       <AnimatePresence>
         {orderNotice && (
           <motion.div
@@ -2948,7 +2264,7 @@ export default function VitalOsClient() {
                 )}
                 <button
                   type="button"
-                  onClick={() => setMuteAssistant((v) => !v)}
+                  onClick={() => setVoiceEnabled((v) => !v)}
                   disabled={!supportsTts}
                   className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-300 bg-white"
                   title={voiceEnabled ? "Mute AI voice" : "Unmute AI voice"}
@@ -2985,12 +2301,9 @@ export default function VitalOsClient() {
           {activePage !== "dashboard" ? (
             <div className="grid gap-3">
               {activePage === "patients" && (
-                <>
                 <div className="rounded-xl border border-[#e3edf9] bg-white p-4 shadow-sm">
                   <div className="mb-3 flex items-center justify-between gap-3">
-                    <p className="text-sm font-semibold text-slate-900">
-                      Patient Roster ({filteredPatients.length} active)
-                    </p>
+                    <p className="text-sm font-semibold text-slate-900">Patient Roster</p>
                     <input
                       value={patientSearch}
                       onChange={(e) => setPatientSearch(e.target.value)}
@@ -3009,15 +2322,9 @@ export default function VitalOsClient() {
                       <span>Status</span>
                     </div>
                   <div className="max-h-[420px] overflow-auto">
-                    <AnimatePresence initial={false}>
                     {filteredPatients.map((p) => (
-                      <motion.button
+                      <button
                         key={p.id}
-                        layout
-                        initial={{ opacity: 0, y: 8 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: 12 }}
-                        transition={{ duration: 0.28 }}
                         type="button"
                         onClick={() => {
                           setActivePage("dashboard");
@@ -3066,59 +2373,11 @@ export default function VitalOsClient() {
                         <span className="text-xs text-slate-600">
                           {p.allergies.length ? "Allergy" : "Stable"}
                         </span>
-                      </motion.button>
+                      </button>
                     ))}
-                    </AnimatePresence>
                   </div>
                   </div>
                 </div>
-                {dischargedList.length > 0 && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 shadow-sm"
-                  >
-                    <div className="mb-2 flex items-center justify-between">
-                      <p className="text-sm font-semibold text-slate-900">Discharged / Completed</p>
-                      <Badge variant="notes">{dischargedList.length} completed</Badge>
-                    </div>
-                    <div className="space-y-2">
-                      {dischargedList.slice(0, 6).map((item) => (
-                        <div
-                          key={item.patientId}
-                          className="flex items-center justify-between rounded-lg border border-emerald-200 bg-white px-3 py-2"
-                        >
-                          <div>
-                            <p className="text-sm font-medium text-slate-900">{item.patientName}</p>
-                            <p className="text-xs text-slate-600">
-                              {item.room} • {new Date(item.dischargedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                            </p>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <Badge variant="notes">{item.status}</Badge>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const restored = patients.find((p) => p.id === item.patientId);
-                                if (!restored) return;
-                                restorePatient(restored);
-                                setOrderNotice(`${restored.name} restored to active roster.`);
-                                pushLocalAssistantResponse(
-                                  `restore ${restored.name}`,
-                                  `${restored.name} has been restored to the active roster.`
-                                );
-                              }}
-                              className="rounded-full border border-emerald-300 bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-800 transition-colors hover:bg-emerald-200"
-                            >
-                              Restore to active roster
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </motion.div>
-                )}
-                </>
               )}
               {activePage === "encounters" && (
                 <div className="grid gap-3">
@@ -3235,25 +2494,15 @@ export default function VitalOsClient() {
                 <div className="grid gap-3">
                   <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                     {[
-                      ["Daily triage volume", activePatients.length, "notes"],
+                      ["Daily triage volume", patients.length, "notes"],
                       ["High acuity cases", highAcuityPatients.length, "risk"],
                       ["Allergy-risk patients", patientsWithAllergies.length, "allergies"],
-                      [
-                        "Medication safety flags",
-                        activePatients.filter((p) => (p.pharmacyNotes ?? "").length > 0).length,
-                        "medications",
-                      ],
+                      ["Medication safety flags", patients.filter((p) => (p.pharmacyNotes ?? "").length > 0).length, "medications"],
                       ["Pending labs", pendingLabsPatients.length, "problems"],
                       ["Imaging ordered", imagingOrderedPatients.length, "medications"],
                       ["Consults requested", consultRequestedPatients.length, "risk"],
                       ["Pediatric cases", pediatricPatients.length, "notes"],
-                      [
-                        "Discharge candidates",
-                        activePatients.filter((p) =>
-                          /discharge|improved/i.test(p.edOrUrgentCourse ?? "")
-                        ).length,
-                        "notes",
-                      ],
+                      ["Discharge candidates", patients.filter((p) => /discharge|improved/i.test(p.edOrUrgentCourse ?? "")).length, "notes"],
                     ].map(([title, value, variant]) => (
                       <div
                         key={String(title)}
@@ -3266,19 +2515,14 @@ export default function VitalOsClient() {
                             Live
                           </Badge>
                         </div>
-                    </div>
-                  ))}
+                      </div>
+                    ))}
                   </div>
                   <div className="rounded-xl border border-[#dce8f8] bg-white p-4 shadow-sm">
                     <p className="text-sm font-semibold text-slate-900">Generated Reports</p>
                     <div className="mt-3 grid gap-2 xl:grid-cols-2">
                       {[
-                        [
-                          "ED Daily Summary",
-                          "Snapshot of active encounters and room occupancy.",
-                          activePatients.length,
-                          "Ready",
-                        ],
+                        ["ED Daily Summary", "Snapshot of active encounters and room occupancy.", patients.length, "Ready"],
                         ["High-Risk Patient Review", "Aggregated CTAS 1-2 and risk flag cohort.", highAcuityPatients.length, "Review"],
                         ["Allergy & Medication Safety Report", "Cross-check allergy and med risk exposure.", patientsWithAllergies.length, "Ready"],
                         ["Pending Diagnostics Report", "Labs and imaging currently pending.", pendingLabsPatients.length + imagingOrderedPatients.length, "Pending"],
@@ -3325,13 +2569,9 @@ export default function VitalOsClient() {
                 <div className="grid gap-3">
                   <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
                     {[
-                      ["Total patients", activePatients.length],
+                      ["Total patients", patients.length],
                       ["Allergy patients", patientsWithAllergies.length],
-                      [
-                        "High-risk flags",
-                        activePatients.filter((p) => (p.riskFlags ?? "").trim().length > 0)
-                          .length,
-                      ],
+                      ["High-risk flags", patients.filter((p) => (p.riskFlags ?? "").trim().length > 0).length],
                       ["Medication count", medicationsCount],
                       ["Pending labs", pendingLabsPatients.length],
                       ["Consult requested", consultRequestedPatients.length],
@@ -3339,7 +2579,7 @@ export default function VitalOsClient() {
                       <div key={String(label)} className="rounded-xl border border-[#dce8f8] bg-white p-3 shadow-sm">
                         <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</p>
                         <p className="mt-1 text-xl font-semibold text-slate-900">{value}</p>
-                  </div>
+                      </div>
                     ))}
                   </div>
                   <div className="grid gap-3 xl:grid-cols-3">
@@ -3356,12 +2596,7 @@ export default function VitalOsClient() {
                               </div>
                               <div className="h-2 rounded-full bg-slate-100">
                                 <div
-                                  className={cn(
-                                    "h-2 rounded-full bg-gradient-to-r",
-                                    resolvedTheme === "dark"
-                                      ? "from-cyan-400 via-blue-400 to-indigo-400 shadow-[0_0_12px_rgba(34,211,238,0.45)]"
-                                      : "from-blue-500 to-cyan-400"
-                                  )}
+                                  className="h-2 rounded-full bg-gradient-to-r from-blue-500 to-cyan-400"
                                   style={{ width: `${(item.value / max) * 100}%` }}
                                 />
                               </div>
@@ -3404,12 +2639,7 @@ export default function VitalOsClient() {
                           return (
                             <div key={item.label} className="flex flex-1 flex-col items-center gap-1">
                               <div
-                                className={cn(
-                                  "w-full rounded-t-md bg-gradient-to-t",
-                                  resolvedTheme === "dark"
-                                    ? "from-cyan-400 via-blue-400 to-indigo-400 shadow-[0_0_12px_rgba(34,211,238,0.45)]"
-                                    : "from-cyan-500 to-blue-500"
-                                )}
+                                className="w-full rounded-t-md bg-gradient-to-t from-cyan-500 to-blue-500"
                                 style={{ height: `${Math.max(12, (item.value / max) * 96)}px` }}
                               />
                               <span className="text-[10px] text-slate-500">{item.label}</span>
@@ -3446,203 +2676,31 @@ export default function VitalOsClient() {
                 </div>
               )}
               {activePage === "settings" && (
-                <div className="grid gap-3">
-                  <div className="grid gap-3 xl:grid-cols-2">
-                    <div className="rounded-xl border border-[#dce8f8] bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md">
-                      <div className="mb-3 flex items-start gap-2">
-                        <Palette className="mt-0.5 h-4 w-4 text-cyan-600" />
-                        <div>
-                          <p className="text-sm font-semibold text-slate-900">Appearance</p>
-                          <p className="text-xs text-slate-600">Theme and visual density controls.</p>
-                        </div>
-                      </div>
-                      <div className="flex gap-2">
-                        {[
-                          { value: "light" as ThemeMode, label: "Light Mode", Icon: Sun },
-                          { value: "dark" as ThemeMode, label: "Dark Mode", Icon: Moon },
-                          { value: "system" as ThemeMode, label: "System", Icon: Monitor },
-                        ].map(({ value, label, Icon: ActiveIcon }) => {
-                          return (
-                            <button
-                              key={value}
-                              type="button"
-                              onClick={() => setThemeMode(value)}
-                              className={cn(
-                                "inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-semibold transition-all",
-                                themeMode === value
-                                  ? "border-cyan-300 bg-cyan-100 text-cyan-900"
-                                  : "border-slate-200 bg-white text-slate-600 hover:border-cyan-200"
-                              )}
-                            >
-                              <ActiveIcon className="h-3.5 w-3.5" />
-                              {label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-2">
-                        <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                          Current Theme Preview
-                        </p>
-                        <div
-                          className={cn(
-                            "rounded-md border px-3 py-2 transition-all",
-                            resolvedTheme === "dark"
-                              ? "border-cyan-300/40 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 text-cyan-100"
-                              : "border-cyan-200 bg-gradient-to-r from-white via-cyan-50 to-blue-50 text-slate-800"
-                          )}
-                        >
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-semibold">VITAL OS Clinical UI</span>
-                            <span className="rounded-full border border-cyan-300/50 px-2 py-0.5 text-[10px]">
-                              {resolvedTheme.toUpperCase()}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl border border-[#dce8f8] bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md">
-                      <div className="mb-3 flex items-start gap-2">
-                        <Volume2 className="mt-0.5 h-4 w-4 text-cyan-600" />
-                        <div>
-                          <p className="text-sm font-semibold text-slate-900">Voice & Audio</p>
-                          <p className="text-xs text-slate-600">Speech output and microphone tuning.</p>
-                        </div>
-                      </div>
-                      <div className="space-y-3 text-xs">
-                        <label className="block">
-                          <span className="mb-1 block text-slate-600">Microphone sensitivity: {micSensitivity}%</span>
-                          <input type="range" min={0} max={100} value={micSensitivity} onChange={(e) => setMicSensitivity(Number(e.target.value))} className="w-full accent-cyan-600" />
-                        </label>
-                        <label className="block">
-                          <span className="mb-1 block text-slate-600">Speech speed: {speechRateSetting}%</span>
-                          <input type="range" min={80} max={130} value={speechRateSetting} onChange={(e) => setSpeechRateSetting(Number(e.target.value))} className="w-full accent-cyan-600" />
-                        </label>
-                        <select
-                          value={assistantVoice}
-                          onChange={(e) => setAssistantVoice(e.target.value)}
-                          className="w-full rounded-lg border border-slate-200 px-2 py-1.5 text-xs"
-                        >
-                          <option>Clinical Voice A</option>
-                          <option>Clinical Voice B</option>
-                          <option>Clinical Voice C</option>
-                        </select>
-                        <button
-                          type="button"
-                          onClick={() => setMuteAssistant((v) => !v)}
-                          className={cn(
-                            "rounded-full border px-3 py-1 font-semibold transition-colors",
-                            muteAssistant
-                              ? "border-rose-200 bg-rose-50 text-rose-700"
-                              : "border-emerald-200 bg-emerald-50 text-emerald-700"
-                          )}
-                        >
-                          {muteAssistant ? "Assistant Muted" : "Assistant Voice Enabled"}
-                        </button>
-                        <p className="text-[11px] text-slate-500">
-                          Status: {voiceSessionLive ? "Listening" : "Idle"} • {micMuted ? "Muted" : "Mic active"} • {voiceEnabled ? "Voice ON" : "Voice OFF"}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl border border-[#dce8f8] bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md">
-                      <div className="mb-3 flex items-start gap-2">
-                        <SlidersHorizontal className="mt-0.5 h-4 w-4 text-cyan-600" />
-                        <div>
-                          <p className="text-sm font-semibold text-slate-900">Clinical Workflow</p>
-                          <p className="text-xs text-slate-600">Operational behavior and panel preferences.</p>
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <button type="button" onClick={() => setAutoOpenChartData((v) => !v)} className={cn("rounded-lg border px-2 py-1.5", autoOpenChartData ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>Auto-open chart data</button>
-                        <button type="button" onClick={() => setAutoScrollToRequested((v) => !v)} className={cn("rounded-lg border px-2 py-1.5", autoScrollToRequested ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>Auto-scroll to data</button>
-                        <button type="button" onClick={() => setMedicationWorkflowAnimations((v) => !v)} className={cn("rounded-lg border px-2 py-1.5", medicationWorkflowAnimations ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>Medication animations</button>
-                        <button type="button" onClick={() => setDeliveryNotificationsEnabled((v) => !v)} className={cn("rounded-lg border px-2 py-1.5", deliveryNotificationsEnabled ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>Delivery notifications</button>
-                        <button type="button" onClick={() => setCompactDashboardMode((v) => !v)} className={cn("rounded-lg border px-2 py-1.5", compactDashboardMode ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>Compact dashboard</button>
-                        <button type="button" onClick={() => setPersistentPatientPanels((v) => !v)} className={cn("rounded-lg border px-2 py-1.5", persistentPatientPanels ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>Persistent panels</button>
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl border border-[#dce8f8] bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md">
-                      <div className="mb-3 flex items-start gap-2">
-                        <BellRing className="mt-0.5 h-4 w-4 text-cyan-600" />
-                        <div>
-                          <p className="text-sm font-semibold text-slate-900">Notifications</p>
-                          <p className="text-xs text-slate-600">Alert and confirmation preferences.</p>
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <button type="button" onClick={() => setDeliveryNotificationsEnabled((v) => !v)} className={cn("rounded-lg border px-2 py-1.5", deliveryNotificationsEnabled ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>Delivery toasts</button>
-                        <button type="button" onClick={() => setHighRiskAlerts((v) => !v)} className={cn("rounded-lg border px-2 py-1.5", highRiskAlerts ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>High-risk alerts</button>
-                        <button type="button" onClick={() => setCriticalLabAlerts((v) => !v)} className={cn("rounded-lg border px-2 py-1.5", criticalLabAlerts ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>Critical lab alerts</button>
-                        <button type="button" onClick={() => setVoiceConfirmationsEnabled((v) => !v)} className={cn("rounded-lg border px-2 py-1.5", voiceConfirmationsEnabled ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>Voice confirmations</button>
-                        <button type="button" onClick={() => setSessionNotificationsEnabled((v) => !v)} className={cn("rounded-lg border px-2 py-1.5 col-span-2", sessionNotificationsEnabled ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>Session notifications</button>
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl border border-[#dce8f8] bg-white p-4 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md">
-                      <div className="mb-3 flex items-start gap-2">
-                        <Accessibility className="mt-0.5 h-4 w-4 text-cyan-600" />
-                        <div>
-                          <p className="text-sm font-semibold text-slate-900">Accessibility</p>
-                          <p className="text-xs text-slate-600">Readability and motion controls.</p>
-                        </div>
-                      </div>
-                      <label className="block text-xs text-slate-600">
-                        Text scaling: {textScalePercent}%
-                        <input type="range" min={90} max={120} value={textScalePercent} onChange={(e) => setTextScalePercent(Number(e.target.value))} className="mt-1 w-full accent-cyan-600" />
-                      </label>
-                      <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
-                        <button type="button" onClick={() => setReducedMotionMode((v) => !v)} className={cn("rounded-lg border px-2 py-1.5", reducedMotionMode ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>Reduced motion</button>
-                        <button type="button" onClick={() => setHighContrastMode((v) => !v)} className={cn("rounded-lg border px-2 py-1.5", highContrastMode ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>High contrast</button>
-                        <button type="button" onClick={() => setLargerTouchTargets((v) => !v)} className={cn("rounded-lg border px-2 py-1.5", largerTouchTargets ? "border-cyan-300 bg-cyan-50 text-cyan-900" : "border-slate-200")}>Large targets</button>
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl border border-[#dce8f8] bg-gradient-to-br from-[#0b2a55] to-[#0f4b78] p-4 text-white shadow-md transition-all hover:-translate-y-0.5 hover:shadow-lg">
-                      <div className="mb-3 flex items-start gap-2">
-                        <CheckCircle2 className="mt-0.5 h-4 w-4 text-cyan-200" />
-                        <div>
-                          <p className="text-sm font-semibold">About VITAL OS</p>
-                          <p className="text-xs text-cyan-100">System status and demo environment.</p>
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-xs text-cyan-50">
-                        <p>Version: <span className="font-semibold">0.1.0-demo</span></p>
-                        <p>Mode: <span className="font-semibold">Demo</span></p>
-                        <p>AI Provider: <span className="font-semibold">Groq/Gemini</span></p>
-                        <p>Voice: <span className="font-semibold">{supportsTts ? "Online" : "Unavailable"}</span></p>
-                        <p>Simulation: <span className="font-semibold">Local state</span></p>
-                        <p>Theme: <span className="font-semibold capitalize">{resolvedTheme}</span></p>
-                      </div>
-                      <p className="mt-3 rounded-lg border border-amber-200/50 bg-amber-300/10 px-2 py-1 text-[11px] text-amber-100">
-                        Demo environment. Mock patient data only.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={resetSettingsToDefaults}
-                      className="rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-1.5 text-xs font-semibold text-cyan-900"
-                    >
-                      Reset Settings to Default
-                    </button>
+                <div className="rounded-xl border border-[#e3edf9] bg-white p-4 shadow-sm">
+                  <p className="text-sm font-semibold text-slate-900">Settings</p>
+                  <div className="mt-3 grid gap-2 text-sm">
+                    <p>Microphone: {supportsSpeech ? "Available" : "Unavailable"}</p>
+                    <p>Voice mode: {voiceSessionLive ? "Live" : "Idle"}</p>
+                    <p>Theme: Light (dark mode ready)</p>
+                    <p className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                      Demo environment. Mock patient data only.
+                    </p>
+                    <div className="mt-2 flex gap-2">
                       <button
                         type="button"
                         onClick={handleClear}
-                      className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs"
+                        className="rounded-lg border border-slate-300 px-3 py-1.5"
                       >
                         Clear Session
                       </button>
                       <button
                         type="button"
                         onClick={() => void refreshPatients()}
-                      className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs"
+                        className="rounded-lg border border-slate-300 px-3 py-1.5"
                       >
                         Reload Patient Store
                       </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -3831,8 +2889,8 @@ export default function VitalOsClient() {
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, y: -4 }}
                       transition={{ duration: 0.2 }}
-                    className="grid grid-cols-[2fr_1fr_1fr] border-b border-slate-100 px-2 py-1.5 text-sm last:border-b-0"
-                  >
+                      className="grid grid-cols-[2fr_1fr_1fr] border-b border-slate-100 px-2 py-1.5 text-sm last:border-b-0"
+                    >
                       <span className="font-medium text-slate-800">{name}</span>
                       <Badge
                         variant={
@@ -3932,7 +2990,7 @@ export default function VitalOsClient() {
                   >
                     <RequestedPatientCard
                       view={requestedPatientView}
-                      problems={editableProblems[requestedPatientView.patientId] ?? []}
+                      problems={problemStateByPatient[requestedPatientView.patientId] ?? []}
                     />
                   </motion.div>
                 ) : null}
@@ -3953,17 +3011,11 @@ export default function VitalOsClient() {
                   <motion.div
                     key={order.id}
                     initial={{ opacity: 0, y: 8 }}
-                    animate={
-                      order.isClosing
-                        ? { opacity: 0, y: 12, scale: 0.985 }
-                        : { opacity: 1, y: 0, scale: 1 }
-                    }
-                    transition={{ duration: order.isClosing ? 0.8 : 0.35, ease: "easeOut" }}
-                className={cn(
-                      "rounded-lg border border-cyan-200/35 bg-white/10 px-3 py-2 backdrop-blur-sm transition-all",
+                    animate={{ opacity: 1, y: 0 }}
+                    className={cn(
+                      "rounded-lg border border-cyan-200/35 bg-white/10 px-3 py-2 backdrop-blur-sm",
                       order.status !== "Delivered" && "animate-pulse",
-                      order.status === "Delivered" &&
-                        "border-emerald-300/70 bg-emerald-400/15 shadow-[0_0_24px_-8px_rgba(34,197,94,0.8)]"
+                      order.status === "Delivered" && "border-emerald-300/70 bg-emerald-400/15"
                     )}
                   >
                     <div className="flex items-center justify-between gap-2">
@@ -3987,7 +3039,7 @@ export default function VitalOsClient() {
                       >
                         {order.status}
                       </Badge>
-                  </div>
+                    </div>
                     <p className="mt-1 text-xs text-white/80">
                       {order.room} •{" "}
                       {new Date(order.createdAt).toLocaleTimeString([], {
@@ -4007,7 +3059,7 @@ export default function VitalOsClient() {
                         }}
                         transition={{ duration: 0.5, ease: "easeOut" }}
                       />
-              </div>
+                    </div>
                     <p className="mt-1 text-[10px] text-cyan-100/90">
                       Queued → Pharmacy → Nurse → Patient
                     </p>
@@ -4015,33 +3067,6 @@ export default function VitalOsClient() {
                 ))}
               </div>
             </div>
-          )}
-
-          {searchResultsTitle && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="mt-3 rounded-xl border border-[#dce8f8] bg-white p-3 shadow-sm"
-            >
-              <div className="mb-2 flex items-center justify-between">
-                <p className="text-sm font-semibold text-slate-900">{searchResultsTitle}</p>
-                <Badge variant="medications">{searchResults.length}</Badge>
-              </div>
-              <div className="grid gap-2 sm:grid-cols-2">
-                {searchResults.map((p) => (
-                  <div key={`search-${p.id}`} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                    <p className="text-sm font-medium text-slate-900">{p.name}</p>
-                    <p className="text-xs text-slate-600">
-                      {p.room} • {p.triageAcuity}
-                    </p>
-                    <p className="mt-1 line-clamp-1 text-xs text-slate-700">{p.chiefConcern}</p>
-                    <p className="mt-1 line-clamp-1 text-[11px] text-slate-600">
-                      Allergies: {p.allergies.join(", ") || "None listed"}
-                    </p>
-            </div>
-                ))}
-          </div>
-            </motion.div>
           )}
 
             </>
@@ -4149,7 +3174,7 @@ export default function VitalOsClient() {
             tab={workspaceTab}
             onTab={setWorkspaceTab}
             onClose={() => setWorkspaceOpen(false)}
-            patients={activePatients}
+            patients={patients}
             selectedPatientId={selectedPatientId}
             onSelectPatient={(id) => {
               if (id === null) userClearedFocusRef.current = true;
