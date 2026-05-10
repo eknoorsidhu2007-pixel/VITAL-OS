@@ -10,7 +10,7 @@
       "sex": "F",
       "dob": "1991-04-18",
       "bloodType": "O+",
-      "room": "Triage 01",
+      "room": "Room 2B",
       "triageAcuity": "CTAS 3",
       "allergies": [
         "Penicillin — rash"
@@ -80,7 +80,7 @@
       "sex": "M",
       "dob": "1958-09-02",
       "bloodType": "A+",
-      "room": "Triage 02",
+      "room": "Room 5C",
       "triageAcuity": "CTAS 2",
       "allergies": [
         "No known drug allergies"
@@ -155,7 +155,7 @@
       "sex": "F",
       "dob": "1997-01-11",
       "bloodType": "B+",
-      "room": "Triage 03",
+      "room": "Room 7A",
       "triageAcuity": "CTAS 3",
       "allergies": [
         "Latex — hives"
@@ -220,7 +220,7 @@
       "sex": "F",
       "dob": "1983-12-05",
       "bloodType": "AB+",
-      "room": "Triage 05",
+      "room": "Room 12B",
       "triageAcuity": "CTAS 3",
       "allergies": [
         "Codeine — vomiting"
@@ -288,12 +288,12 @@
       "sex": "F",
       "dob": "1952-06-29",
       "bloodType": "B-",
-      "room": "Triage 07",
+      "room": "Observation 2",
       "triageAcuity": "CTAS 2",
       "allergies": [
         "Morphine — severe confusion"
       ],
-      "chiefConcern": "Fever, confusion, painful urination",
+      "chiefConcern": "resolved",
       "symptoms": [
         "Fever",
         "Dysuria",
@@ -304,16 +304,7 @@
         "Suspected UTI with delirium",
         "Rule out sepsis"
       ],
-      "medications": [
-        {
-          "name": "Amlodipine",
-          "sig": "5 mg PO daily"
-        },
-        {
-          "name": "Apixaban",
-          "sig": "5 mg PO BID"
-        }
-      ],
+      "medications": [],
       "vitals": {
         "BP": "98/62",
         "HR": "118",
@@ -324,7 +315,7 @@
       "recentLabs": "CBC, lactate, cultures, urinalysis pending.",
       "lastVisit": "2026-05-10",
       "social": "Lives with daughter. Uses walker.",
-      "chartNote": "Acutely confused compared with baseline per family.",
+      "chartNote": "suspected UTI with delirium resolved",
       "pcp": "Dr. Olivia Hart",
       "codeStatus": "Full Code",
       "emergencyContact": {
@@ -357,7 +348,7 @@
       "sex": "M",
       "dob": "2017-11-19",
       "bloodType": "O+",
-      "room": "Peds 01",
+      "room": "Peds 3A",
       "triageAcuity": "CTAS 3",
       "allergies": [
         "Amoxicillin — hives"
@@ -422,7 +413,7 @@
       "sex": "F",
       "dob": "1994-08-08",
       "bloodType": "A+",
-      "room": "Triage 08",
+      "room": "Room 4A",
       "triageAcuity": "CTAS 2",
       "allergies": [
         "No known drug allergies"
@@ -487,7 +478,7 @@
       "sex": "M",
       "dob": "1980-02-26",
       "bloodType": "O+",
-      "room": "Triage 09",
+      "room": "Room 6D",
       "triageAcuity": "CTAS 3",
       "allergies": [
         "Shellfish — anaphylaxis"
@@ -552,7 +543,7 @@
       "sex": "F",
       "dob": "1963-10-16",
       "bloodType": "AB-",
-      "room": "Triage 10",
+      "room": "Room 8C",
       "triageAcuity": "CTAS 3",
       "allergies": [
         "NSAIDs — GI bleeding"
@@ -621,7 +612,7 @@
       "sex": "M",
       "dob": "1986-05-03",
       "bloodType": "B+",
-      "room": "Triage 11",
+      "room": "Isolation 1",
       "triageAcuity": "CTAS 4",
       "allergies": [
         "No known allergies"
@@ -684,7 +675,7 @@
       "sex": "F",
       "dob": "1968-01-30",
       "bloodType": "O+",
-      "room": "Triage 12",
+      "room": "Room 10B",
       "triageAcuity": "CTAS 2",
       "allergies": [
         "Contrast dye — prior hives"
@@ -754,7 +745,7 @@
       "sex": "M",
       "dob": "2022-08-21",
       "bloodType": "A+",
-      "room": "Peds 02",
+      "room": "Peds 4C",
       "triageAcuity": "CTAS 3",
       "allergies": [
         "Egg — hives"
@@ -814,7 +805,7 @@
       "sex": "F",
       "dob": "1975-09-25",
       "bloodType": "B+",
-      "room": "Triage 13",
+      "room": "Room 11A",
       "triageAcuity": "CTAS 3",
       "allergies": [
         "Metronidazole — rash"
@@ -879,7 +870,7 @@
       "sex": "M",
       "dob": "1944-11-07",
       "bloodType": "O-",
-      "room": "Triage 14",
+      "room": "Room 14C",
       "triageAcuity": "CTAS 2",
       "allergies": [
         "Haloperidol — severe rigidity"
@@ -950,7 +941,7 @@
       "sex": "F",
       "dob": "2001-02-09",
       "bloodType": "A+",
-      "room": "Triage 15",
+      "room": "Room 15B",
       "triageAcuity": "CTAS 3",
       "allergies": [
         "No known drug allergies"
@@ -1016,7 +1007,7 @@
       "sex": "M",
       "dob": "1965-12-20",
       "bloodType": "B+",
-      "room": "Triage 16",
+      "room": "Room 16A",
       "triageAcuity": "CTAS 3",
       "allergies": [
         "Ciprofloxacin — tendon pain"
@@ -1086,7 +1077,7 @@
       "sex": "F",
       "dob": "1989-06-13",
       "bloodType": "O+",
-      "room": "Triage 17",
+      "room": "Room 18C",
       "triageAcuity": "CTAS 3",
       "allergies": [
         "Clindamycin — diarrhea"
@@ -1151,7 +1142,7 @@
       "sex": "M",
       "dob": "1996-04-04",
       "bloodType": "A-",
-      "room": "Triage 18",
+      "room": "Room 20B",
       "triageAcuity": "CTAS 2",
       "allergies": [
         "No known allergies"
@@ -1211,7 +1202,7 @@
       "sex": "F",
       "dob": "2009-09-15",
       "bloodType": "AB+",
-      "room": "Peds 03",
+      "room": "Peds 5B",
       "triageAcuity": "CTAS 2",
       "allergies": [
         "Azithromycin — rash"
