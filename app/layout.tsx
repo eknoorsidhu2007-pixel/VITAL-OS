@@ -23,12 +23,9 @@ export const metadata: Metadata = {
   ],
   authors: [{ name: "VITAL OS" }],
   icons: {
-    icon: [
-      { url: "/vital-logo.png", type: "image/png" },
-      { url: "/icon.svg", type: "image/svg+xml" },
-    ],
-    shortcut: "/vital-logo.png",
-    apple: "/vital-logo.png",
+    icon: "/favicon.png",
+    shortcut: "/favicon.png",
+    apple: "/favicon.png",
   },
 };
 
