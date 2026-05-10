@@ -2,7 +2,11 @@
  * VITAL OS — LLM brain (Groq).
  */
 
-import { formatRosterForPrompt, type DemoPatient } from "@/lib/demo-patients";
+import {
+  formatRosterForPrompt,
+  patientToSnapshot,
+  type DemoPatient,
+} from "@/lib/demo-patients";
 import {
   executePatientToolCall,
   listPatients,
@@ -38,7 +42,12 @@ Output rules:
 - Plain text only — no Markdown bold/italic (no **, __, or single * / _ emphasis markers).
 - Default cap ~320 words unless they request a long differential, full note, or exhaustive plan.
 - End high-stakes or uncertain guidance with one "Safety:" line.
-- For roster patients: never invent vitals, labs, imaging, or history — only use what the stored record contains.`;
+- For roster patients: never invent vitals, labs, imaging, or history — only use what the stored record contains.
+
+Precision Q&A (critical):
+- When asked how many patients are in the roster, on the board, or in the census: use the exact integer from the ROSTER SNAPSHOT header (N patients total). Do not guess or round.
+- When asked for a specific fact (age, DOB, MRN, room, chief concern, acuity, a single vital, one allergy, etc.): lead with the verbatim value from ACTIVE PATIENT FULL RECORD or tool output in the first sentence, then add brief clinical context only if they asked for interpretation.
+- Do not answer vague "chart displayed" or "I pulled the chart" — always include the concrete data they asked for when it exists in the record.`;
 
 export type VitalMode = "general" | "soap" | "summary" | "emergency";
 
@@ -203,12 +212,19 @@ function buildFullSystemPrompt(
   roster: DemoPatient[],
   activePatientId?: string | null
 ): string {
-  const block = formatRosterForPrompt(roster);
+  const count = roster.length;
+  const block = `ROSTER SNAPSHOT (${count} patient${
+    count === 1 ? "" : "s"
+  } total — use this exact count when asked how many patients are in the roster):\n${formatRosterForPrompt(
+    roster
+  )}`;
   let focus = "";
   if (activePatientId) {
     const p = roster.find((x) => x.id === activePatientId);
     if (p) {
-      focus = `\n\nCLINICIAN FOCUS: The active chart is ${p.name} (${p.mrn}, id ${p.id}). Use this record for follow-up questions unless they clearly ask about someone else or a general topic.\n`;
+      focus = `\n\nCLINICIAN FOCUS: The active chart is ${p.name} (${p.mrn}, id ${p.id}). Use this record for follow-up questions unless they clearly ask about someone else or a general topic.\n\nACTIVE PATIENT FULL RECORD — answer factual questions from this block first; quote values exactly:\n${patientToSnapshot(
+        p
+      )}\n`;
     }
   }
   return `${VITAL_OS_SYSTEM_PROMPT}\n\n${block}${focus}`;

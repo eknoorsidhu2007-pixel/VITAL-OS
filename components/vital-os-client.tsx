@@ -359,6 +359,7 @@ function pickBySeed<T>(items: T[], seed: string): T {
 
 type PatientFieldKey =
   | "overview"
+  | "demographics"
   | "medications"
   | "allergies"
   | "vitals"
@@ -428,7 +429,7 @@ type ActivePage =
 function detectRequestedFields(transcript: string): PatientFieldKey[] {
   const q = transcript.toLowerCase();
   const hasInfoIntent =
-    /pull up|show|display|open|review|give me|tell me|what is|what are|chart|patient|mrn|record|info/.test(
+    /pull up|show|display|open|review|give me|i need|i want|tell me|what is|what are|what's|whats|chart|patient|mrn|record|info|how old|list|read (me|out)/.test(
       q
     );
   if (!hasInfoIntent) return [];
@@ -436,15 +437,22 @@ function detectRequestedFields(transcript: string): PatientFieldKey[] {
   const out = new Set<PatientFieldKey>();
   if (/(med|meds|medication|rx|prescription)/.test(q)) out.add("medications");
   if (/(allerg|allergy)/.test(q)) out.add("allergies");
-  if (/(vital|bp|heart rate|spo2|temp|temperature)/.test(q)) out.add("vitals");
+  if (/(vital|bp|heart rate|spo2|temp|temperature|pulse)/.test(q))
+    out.add("vitals");
   if (/(lab|a1c|bmp|cbc|creatinine|bnp)/.test(q)) out.add("labs");
-  if (/(diagnos|problem|condition|assessment)/.test(q))
-    out.add("diagnoses");
+  if (/(diagnos|problem|condition|assessment)/.test(q)) out.add("diagnoses");
   if (/(imag|xray|ct|mri|echo|ekg|ultrasound)/.test(q)) out.add("imaging");
   if (/(social|smok|alcohol|home|family support)/.test(q)) out.add("social");
   if (/(history|surgical|family history|immunization)/.test(q))
     out.add("history");
   if (/(plan|next step|consult|follow[- ]?up|risk)/.test(q)) out.add("plan");
+  if (
+    /\bage\b|how old|years old|\bdob\b|date of birth|birthday|\bmrn\b|medical record( number)?|\broom\b|\bblood type\b|triag|ctas|acuity|\bchief concern\b|presenting|complaint|\bsymptoms?\b|\bcode status\b|\bpcp\b|primary care|provider|insurance|address/.test(
+      q
+    )
+  ) {
+    out.add("demographics");
+  }
 
   if (out.size === 0) out.add("overview");
   return Array.from(out);
@@ -456,6 +464,11 @@ function buildRequestedPatientView(
 ): RequestedPatientView {
   const lines: string[] = [];
   const wantsOverview = fields.includes("overview");
+  if (wantsOverview) {
+    lines.push(
+      `${patient.name}: age ${patient.age} ${patient.sex}; DOB ${patient.dob}; room ${patient.room}; MRN ${patient.mrn}; acuity ${patient.triageAcuity}; chief concern: ${patient.chiefConcern}.`
+    );
+  }
   if (wantsOverview || fields.includes("diagnoses")) {
     lines.push(`Problems: ${patient.diagnoses.join("; ") || "(not listed)"}`);
   }
@@ -505,6 +518,14 @@ function buildRequestedPatientView(
           .join(" | ") || "(not listed)"
       }`
     );
+  }
+  if (fields.includes("demographics") && !wantsOverview) {
+    lines.push(
+      `Demographics: ${patient.name}; age ${patient.age} ${patient.sex}; DOB ${patient.dob}; MRN ${patient.mrn}; room ${patient.room}; blood ${patient.bloodType}; acuity ${patient.triageAcuity}; chief concern: ${patient.chiefConcern}.`
+    );
+    if (patient.symptoms?.length) {
+      lines.push(`Symptoms: ${patient.symptoms.join(", ")}.`);
+    }
   }
 
   return {
@@ -564,6 +585,121 @@ function findPatientMatches(transcript: string, patients: DemoPatient[]): DemoPa
   return tokenMatches;
 }
 
+function buildVoiceSummaryForChartOpen(
+  transcript: string,
+  patient: DemoPatient,
+  sections: PatientFieldKey[],
+  editableProblems: EditableProblem[]
+): string {
+  const q = transcript.toLowerCase();
+  const sentences: string[] = [];
+  const add = (s: string) => {
+    if (s && !sentences.includes(s)) sentences.push(s);
+  };
+
+  const sayDemographics = () =>
+    `${patient.name} is ${patient.age} years old, ${patient.sex}. Date of birth ${patient.dob}. MRN ${patient.mrn}. Room ${patient.room}. Blood type ${patient.bloodType}. Triage acuity ${patient.triageAcuity}. Chief concern: ${patient.chiefConcern}.`;
+
+  const wantsFull =
+    sections.includes("overview") ||
+    sections.length >= 6 ||
+    /full chart|entire chart|complete chart|everything (on|in) (the )?chart/.test(q);
+
+  if (wantsFull) {
+    add(sayDemographics());
+    add(`Allergies: ${patient.allergies.join(", ") || "none listed"}.`);
+    const medNames = patient.medications.map((m) => `${m.name}, ${m.sig}`).join("; ");
+    add(`Medications: ${medNames || "none listed"}.`);
+    const probLines = editableProblems
+      .map((x) => `${x.name} (${x.status})`)
+      .join("; ");
+    add(`Problems: ${probLines || "none listed"}.`);
+    const vit = Object.entries(patient.vitals)
+      .map(([k, v]) => `${k} ${v}`)
+      .join(", ");
+    add(`Vitals: ${vit || "not documented"}.`);
+    add(`Recent labs: ${patient.recentLabs || "not listed"}.`);
+    const planBits = [patient.consultants, patient.riskFlags, patient.edOrUrgentCourse]
+      .filter(Boolean)
+      .join(" ");
+    add(`Plan context: ${planBits || "not listed"}.`);
+    return sentences.join(" ");
+  }
+
+  if (sections.includes("demographics")) {
+    const specific =
+      /\bage\b|how old|years old|\bdob\b|date of birth|birthday|\bmrn\b|medical record|\broom\b|\bblood type\b|triag|ctas|acuity|chief concern|presenting|complaint|\bsymptoms?\b|\bdemographic/.test(
+        q
+      );
+    const narrowDemoFact =
+      /\bage\b|how old|years old|\bdob\b|date of birth|birthday|\bmrn\b|medical record|\broom\b|\bblood type\b|triag|ctas|acuity|chief concern|presenting|complaint|\bsymptoms?\b/.test(
+        q
+      );
+    if (/\bage\b|how old|years old/.test(q)) {
+      add(`${patient.name} is ${patient.age} years old, ${patient.sex}.`);
+    }
+    if (/\bdob\b|date of birth|birthday/.test(q)) {
+      add(`${patient.name}'s date of birth is ${patient.dob}.`);
+    }
+    if (/\bmrn\b|medical record/.test(q)) add(`Medical record number is ${patient.mrn}.`);
+    if (/\broom\b/.test(q)) add(`Room assignment is ${patient.room}.`);
+    if (/\bblood type\b/.test(q)) add(`Blood type is ${patient.bloodType}.`);
+    if (/triag|ctas|acuity/i.test(q)) add(`Triage acuity is ${patient.triageAcuity}.`);
+    if (/chief concern|presenting|complaint/i.test(q))
+      add(`Chief concern: ${patient.chiefConcern}.`);
+    if (/\bsymptoms?\b/.test(q) && patient.symptoms?.length) {
+      add(`Symptoms include: ${patient.symptoms.join(", ")}.`);
+    }
+    if (!specific) {
+      add(sayDemographics());
+    } else if (/demographic/.test(q) && !narrowDemoFact) {
+      add(sayDemographics());
+    }
+  }
+
+  if (
+    sections.includes("vitals") ||
+    /vital|bp\b|blood pressure|heart rate|spo2|pulse|temp\b|temperature/i.test(q)
+  ) {
+    const vit = Object.entries(patient.vitals)
+      .map(([k, v]) => `${k} ${v}`)
+      .join(", ");
+    add(`Vitals for ${patient.name}: ${vit || "not documented"}.`);
+  }
+  if (sections.includes("medications")) {
+    const m = patient.medications.map((x) => `${x.name}, ${x.sig}`).join("; ");
+    add(`Medications: ${m || "none listed"}.`);
+  }
+  if (sections.includes("allergies")) {
+    add(`Allergies: ${patient.allergies.join("; ") || "none listed"}.`);
+  }
+  if (sections.includes("labs")) {
+    add(`Labs: ${patient.recentLabs || "not listed"}.`);
+  }
+  if (sections.includes("diagnoses") || /\bproblem|diagnos/i.test(q)) {
+    const probLines = editableProblems
+      .map((x) => `${x.name}, status ${x.status}`)
+      .join("; ");
+    add(`Problem list: ${probLines || "none listed"}.`);
+  }
+  if (sections.includes("imaging")) {
+    add(
+      `Imaging: ${patient.imagingStudies || patient.cardiacStudies || "not listed"}.`
+    );
+  }
+  if (sections.includes("plan")) {
+    const planBits = [patient.consultants, patient.riskFlags, patient.edOrUrgentCourse]
+      .filter(Boolean)
+      .join(" ");
+    add(`Plan and risk: ${planBits || "not listed"}.`);
+  }
+
+  if (sentences.length === 0) {
+    return `Chart opened for ${patient.name}.`;
+  }
+  return sentences.join(" ");
+}
+
 function parseVoiceCommand(
   transcript: string,
   patients: DemoPatient[],
@@ -590,10 +726,10 @@ function parseVoiceCommand(
   }
 
   const hasChartIntent =
-    /pull up|show|open|find|view|bring up|display|review|what is|tell me|get/.test(
+    /pull up|show|open|find|view|bring up|display|review|what is|what are|what's|whats|tell me|get|give me|i need|i want|how old|list|read/.test(
       q
     ) &&
-    /chart|allerg|med|problem|note|vital|lab|emergency|care team|risk|patient|age|dob|blood|room|chief concern/.test(
+    /chart|allerg|med|problem|note|vital|lab|emergency|care team|risk|patient|age|dob|blood|room|chief concern|mrn|symptom|triage|acuity|demographic/.test(
       q
     );
   if (!hasChartIntent) return { kind: "none" };
@@ -615,10 +751,34 @@ function parseVoiceCommand(
   }
 
   const sections = detectRequestedFields(transcript);
-  const resolvedSections =
-    sections.includes("overview") || /full chart/.test(q)
-      ? (["overview", "allergies", "medications", "diagnoses", "vitals", "labs", "plan"] as PatientFieldKey[])
-      : sections;
+  let resolvedSections: PatientFieldKey[];
+  if (
+    /full chart|entire chart|complete chart|open (the )?full|everything (on|in) (the )?chart/i.test(
+      q
+    )
+  ) {
+    resolvedSections = [
+      "overview",
+      "allergies",
+      "medications",
+      "diagnoses",
+      "vitals",
+      "labs",
+      "plan",
+    ];
+  } else if (sections.includes("overview") && sections.length === 1) {
+    resolvedSections = [
+      "overview",
+      "allergies",
+      "medications",
+      "diagnoses",
+      "vitals",
+      "labs",
+      "plan",
+    ];
+  } else {
+    resolvedSections = sections;
+  }
   return { kind: "open_sections", patientId: target.id, sections: resolvedSections };
 }
 
@@ -1478,6 +1638,19 @@ export default function VitalOsClient() {
         return true;
       }
 
+      const rosterCountIntent =
+        /how many patients|number of patients|patient count|how many (people|cases)|roster (size|count)|census|patients (on|in) (the )?(board|roster|list)|total patients|count (the )?patients|size of (the )?roster/i.test(
+          lower
+        );
+      if (rosterCountIntent) {
+        const n = patients.length;
+        pushLocalAssistantResponse(
+          command,
+          `There are ${n} patient${n === 1 ? "" : "s"} on the roster.`
+        );
+        return true;
+      }
+
       const action = parseVoiceCommand(command, patients, selectedPatientId);
       if (action.kind === "none") return false;
       if (action.kind === "clear_session") {
@@ -1504,13 +1677,13 @@ export default function VitalOsClient() {
         return true;
       }
       await openRequestedView(patient, action.sections);
-      const spoken = lower.includes("vital")
-        ? `Vitals displayed for ${patient.name}.`
-        : lower.includes("allerg")
-          ? `Allergies displayed for ${patient.name}.`
-          : lower.includes("med")
-            ? `Medications displayed for ${patient.name}.`
-            : `Chart data displayed for ${patient.name}.`;
+      const editable = problemStateByPatient[patient.id] ?? [];
+      const spoken = buildVoiceSummaryForChartOpen(
+        command,
+        patient,
+        action.sections,
+        editable
+      );
       pushLocalAssistantResponse(command, spoken);
       return true;
     },
@@ -1521,6 +1694,7 @@ export default function VitalOsClient() {
       activeRequestedSections,
       openRequestedView,
       pushLocalAssistantResponse,
+      problemStateByPatient,
     ]
   );
 
@@ -3370,6 +3544,37 @@ function RequestedPatientCard({
           </p>
         </div>
       </div>
+      )}
+
+      {view.fields.includes("demographics") && !wantsOverview && (
+        <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+          <div className="rounded-lg border border-violet-100 bg-violet-50/60 px-2.5 py-2">
+            <p className="text-[10px] uppercase text-neutral-500">DOB</p>
+            <p className="text-sm font-semibold text-neutral-900">{p.dob}</p>
+          </div>
+          <div className="rounded-lg border border-violet-100 bg-violet-50/60 px-2.5 py-2">
+            <p className="text-[10px] uppercase text-neutral-500">Room</p>
+            <p className="text-sm font-semibold text-neutral-900">{p.room}</p>
+          </div>
+          <div className="rounded-lg border border-violet-100 bg-violet-50/60 px-2.5 py-2">
+            <p className="text-[10px] uppercase text-neutral-500">Blood type</p>
+            <p className="text-sm font-semibold text-neutral-900">{p.bloodType}</p>
+          </div>
+          <div className="rounded-lg border border-violet-100 bg-violet-50/60 px-2.5 py-2">
+            <p className="text-[10px] uppercase text-neutral-500">Acuity</p>
+            <p className="text-sm font-semibold text-neutral-900">{p.triageAcuity}</p>
+          </div>
+          <div className="col-span-2 rounded-lg border border-violet-100 bg-violet-50/60 px-2.5 py-2 sm:col-span-3">
+            <p className="text-[10px] uppercase text-neutral-500">Chief concern</p>
+            <p className="text-sm font-semibold text-neutral-900">{p.chiefConcern}</p>
+          </div>
+          {p.symptoms && p.symptoms.length > 0 && (
+            <div className="col-span-2 rounded-lg border border-violet-100 bg-violet-50/60 px-2.5 py-2 sm:col-span-3">
+              <p className="text-[10px] uppercase text-neutral-500">Symptoms</p>
+              <p className="text-sm text-neutral-800">{p.symptoms.join(", ")}</p>
+            </div>
+          )}
+        </div>
       )}
 
       {show("vitals") && vitals.length > 0 && (
