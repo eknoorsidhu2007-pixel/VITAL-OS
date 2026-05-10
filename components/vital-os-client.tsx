@@ -325,6 +325,69 @@ function detectOrderMedication(command: string): string | null {
   return null;
 }
 
+function normalizeMedicationToken(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function getKnownMedicationNames(patients: DemoPatient[]): string[] {
+  const set = new Set<string>();
+  for (const p of patients) {
+    for (const m of p.medications) {
+      const normalized = normalizeMedicationToken(m.name);
+      if (normalized) set.add(normalized);
+      const firstWord = normalized.split(" ")[0];
+      if (firstWord) set.add(firstWord);
+    }
+  }
+  // Common emergency/ED meds we still want recognized if not in demo roster meds.
+  for (const fallback of ["aspirin", "epinephrine", "salbutamol"]) {
+    set.add(fallback);
+  }
+  return Array.from(set);
+}
+
+function extractMedicationOrderIntent(
+  command: string,
+  patients: DemoPatient[]
+): { medication: string; uncertain: boolean } | null {
+  const q = command.trim().toLowerCase();
+  if (!q) return null;
+
+  if (
+    /^(give me|get me|show me|display|pull up|bring up|open)\b/.test(q) ||
+    /\bgive me\b/.test(q)
+  ) {
+    return null;
+  }
+
+  const knownMeds = getKnownMedicationNames(patients);
+  const medication = detectOrderMedication(command);
+  const hasOrderVerb =
+    /\b(prescribe|administer|queue medication|medication order|order medication|send medication|pharmacy|give)\b/.test(
+      q
+    );
+  if (!hasOrderVerb || !medication) return null;
+
+  const normalizedMed = normalizeMedicationToken(medication);
+  if (!normalizedMed) return null;
+  const looksLikeRouteDose =
+    /\b(\d+(\.\d+)?\s?(mg|mcg|g|ml|units?)|po|iv|im|neb|prn|bid|tid|qid|tablet|capsule|inhaler)\b/.test(
+      normalizedMed
+    );
+  const inKnownList = knownMeds.some(
+    (m) => normalizedMed.includes(m) || m.includes(normalizedMed)
+  );
+
+  // For "give X to Y", require stronger proof that X is actually a medication.
+  if (/\bgive\b/.test(q) && !inKnownList && !looksLikeRouteDose) {
+    return { medication, uncertain: true };
+  }
+  if (!inKnownList && !looksLikeRouteDose) {
+    return { medication, uncertain: true };
+  }
+  return { medication, uncertain: false };
+}
+
 function detectStatusValue(command: string): ProblemStatus | null {
   if (/ruled\s*out/i.test(command)) return "Ruled out";
   if (/resolved/i.test(command)) return "Resolved";
@@ -360,6 +423,11 @@ function pickBySeed<T>(items: T[], seed: string): T {
 type PatientFieldKey =
   | "overview"
   | "demographics"
+  | "chief_concern"
+  | "emergency_contact"
+  | "care_team"
+  | "risk_flags"
+  | "notes"
   | "medications"
   | "allergies"
   | "vitals"
@@ -446,6 +514,14 @@ function detectRequestedFields(transcript: string): PatientFieldKey[] {
   if (/(history|surgical|family history|immunization)/.test(q))
     out.add("history");
   if (/(plan|next step|consult|follow[- ]?up|risk)/.test(q)) out.add("plan");
+  if (/(emergency contact|next of kin|contact info)/.test(q))
+    out.add("emergency_contact");
+  if (/(care team|team|consultant|consultants)/.test(q)) out.add("care_team");
+  if (/(risk flag|risk flags|high risk|safety risk)/.test(q))
+    out.add("risk_flags");
+  if (/(chief concern|presenting complaint|chief complaint)/.test(q))
+    out.add("chief_concern");
+  if (/(chart note|notes|note)/.test(q)) out.add("notes");
   if (
     /\bage\b|how old|years old|\bdob\b|date of birth|birthday|\bmrn\b|medical record( number)?|\broom\b|\bblood type\b|triag|ctas|acuity|\bchief concern\b|presenting|complaint|\bsymptoms?\b|\bcode status\b|\bpcp\b|primary care|provider|insurance|address/.test(
       q
@@ -518,6 +594,27 @@ function buildRequestedPatientView(
           .join(" | ") || "(not listed)"
       }`
     );
+  }
+  if (fields.includes("emergency_contact")) {
+    lines.push(
+      `Emergency contact: ${patient.emergencyContact.name} (${patient.emergencyContact.relationship}) ${patient.emergencyContact.phone}.`
+    );
+  }
+  if (fields.includes("care_team")) {
+    lines.push(
+      `Care team: ${
+        patient.careTeam?.join(", ") || patient.consultants || "(not listed)"
+      }`
+    );
+  }
+  if (fields.includes("risk_flags")) {
+    lines.push(`Risk flags: ${patient.riskFlags || "(not listed)"}`);
+  }
+  if (fields.includes("chief_concern")) {
+    lines.push(`Chief concern: ${patient.chiefConcern}`);
+  }
+  if (fields.includes("notes")) {
+    lines.push(`Notes: ${patient.chartNote || "(not listed)"}`);
   }
   if (fields.includes("demographics") && !wantsOverview) {
     lines.push(
@@ -693,6 +790,27 @@ function buildVoiceSummaryForChartOpen(
       .join(" ");
     add(`Plan and risk: ${planBits || "not listed"}.`);
   }
+  if (sections.includes("emergency_contact")) {
+    add(
+      `Emergency contact for ${patient.name}: ${patient.emergencyContact.name}, ${patient.emergencyContact.relationship}, ${patient.emergencyContact.phone}.`
+    );
+  }
+  if (sections.includes("care_team")) {
+    add(
+      `Care team: ${
+        patient.careTeam?.join(", ") || patient.consultants || "not listed"
+      }.`
+    );
+  }
+  if (sections.includes("risk_flags")) {
+    add(`Risk flags: ${patient.riskFlags || "none listed"}.`);
+  }
+  if (sections.includes("chief_concern")) {
+    add(`Chief concern: ${patient.chiefConcern}.`);
+  }
+  if (sections.includes("notes")) {
+    add(`Chart notes: ${patient.chartNote || "not listed"}.`);
+  }
 
   if (sentences.length === 0) {
     return `Chart opened for ${patient.name}.`;
@@ -729,7 +847,7 @@ function parseVoiceCommand(
     /pull up|show|open|find|view|bring up|display|review|what is|what are|what's|whats|tell me|get|give me|i need|i want|how old|list|read/.test(
       q
     ) &&
-    /chart|allerg|med|problem|note|vital|lab|emergency|care team|risk|patient|age|dob|blood|room|chief concern|mrn|symptom|triage|acuity|demographic/.test(
+    /chart|allerg|med|problem|note|vital|lab|emergency|care team|risk|patient|age|dob|blood|room|chief concern|mrn|symptom|triage|acuity|demographic|contact|consultant/.test(
       q
     );
   if (!hasChartIntent) return { kind: "none" };
@@ -1597,15 +1715,72 @@ export default function VitalOsClient() {
         return true;
       }
 
-      const orderIntent = /prescribe|give|order|send medication|send .*med/i.test(lower);
+      const rosterCountIntent =
+        /how many patients|number of patients|patient count|how many (people|cases)|roster (size|count)|census|patients (on|in) (the )?(board|roster|list)|total patients|count (the )?patients|size of (the )?roster/i.test(
+          lower
+        );
+      if (rosterCountIntent) {
+        const n = patients.length;
+        pushLocalAssistantResponse(
+          command,
+          `There are ${n} patient${n === 1 ? "" : "s"} on the roster.`
+        );
+        return true;
+      }
+
+      const action = parseVoiceCommand(command, patients, selectedPatientId);
+      if (action.kind !== "none") {
+        if (action.kind === "clear_session") {
+          resetSession();
+          pushLocalAssistantResponse(command, "Session ended. Panels cleared.");
+          return true;
+        }
+        if (action.kind === "patient_ambiguous") {
+          setError("Multiple patients matched. Select one.");
+          return true;
+        }
+        if (action.kind === "patient_not_found") {
+          setError(`Patient not found: ${action.query}`);
+          return true;
+        }
+        if (action.kind === "close_chart") {
+          setRequestedPatientView(null);
+          setActiveRequestedSections([]);
+          return true;
+        }
+        const patient = patients.find((p) => p.id === action.patientId);
+        if (!patient) {
+          setError("Patient not found.");
+          return true;
+        }
+        await openRequestedView(patient, action.sections);
+        const editable = problemStateByPatient[patient.id] ?? [];
+        const spoken = buildVoiceSummaryForChartOpen(
+          command,
+          patient,
+          action.sections,
+          editable
+        );
+        pushLocalAssistantResponse(command, spoken);
+        return true;
+      }
+
+      const orderIntent = extractMedicationOrderIntent(command, patients);
       if (orderIntent) {
-        const medication = detectOrderMedication(command);
+        if (orderIntent.uncertain) {
+          pushLocalAssistantResponse(
+            command,
+            "Do you want to view chart data or queue a medication order?"
+          );
+          return true;
+        }
+        const medication = orderIntent.medication;
         const matches = findPatientMatches(command, patients);
         const active =
           (selectedPatientId && patients.find((p) => p.id === selectedPatientId)) || null;
         const target = matches[0] ?? active;
-        if (!target || !medication) {
-          pushLocalAssistantResponse(command, "Please confirm the medication and patient.");
+        if (!target) {
+          pushLocalAssistantResponse(command, "Please confirm which patient should receive the medication.");
           return true;
         }
         const nurseName = pickBySeed(MOCK_NURSES, `${target.id}-${medication}`);
@@ -1637,55 +1812,7 @@ export default function VitalOsClient() {
         );
         return true;
       }
-
-      const rosterCountIntent =
-        /how many patients|number of patients|patient count|how many (people|cases)|roster (size|count)|census|patients (on|in) (the )?(board|roster|list)|total patients|count (the )?patients|size of (the )?roster/i.test(
-          lower
-        );
-      if (rosterCountIntent) {
-        const n = patients.length;
-        pushLocalAssistantResponse(
-          command,
-          `There are ${n} patient${n === 1 ? "" : "s"} on the roster.`
-        );
-        return true;
-      }
-
-      const action = parseVoiceCommand(command, patients, selectedPatientId);
-      if (action.kind === "none") return false;
-      if (action.kind === "clear_session") {
-        resetSession();
-        pushLocalAssistantResponse(command, "Session ended. Panels cleared.");
-        return true;
-      }
-      if (action.kind === "patient_ambiguous") {
-        setError("Multiple patients matched. Select one.");
-        return true;
-      }
-      if (action.kind === "patient_not_found") {
-        setError(`Patient not found: ${action.query}`);
-        return true;
-      }
-      if (action.kind === "close_chart") {
-        setRequestedPatientView(null);
-        setActiveRequestedSections([]);
-        return true;
-      }
-      const patient = patients.find((p) => p.id === action.patientId);
-      if (!patient) {
-        setError("Patient not found.");
-        return true;
-      }
-      await openRequestedView(patient, action.sections);
-      const editable = problemStateByPatient[patient.id] ?? [];
-      const spoken = buildVoiceSummaryForChartOpen(
-        command,
-        patient,
-        action.sections,
-        editable
-      );
-      pushLocalAssistantResponse(command, spoken);
-      return true;
+      return false;
     },
     [
       patients,
