@@ -293,7 +293,7 @@
       "allergies": [
         "Morphine — severe confusion"
       ],
-      "chiefConcern": "resolved",
+      "chiefConcern": "Fever, confusion, painful urination",
       "symptoms": [
         "Fever",
         "Dysuria",
@@ -315,7 +315,7 @@
       "recentLabs": "CBC, lactate, cultures, urinalysis pending.",
       "lastVisit": "2026-05-10",
       "social": "Lives with daughter. Uses walker.",
-      "chartNote": "suspected UTI with delirium resolved",
+      "chartNote": "Acutely confused compared with baseline per family.",
       "pcp": "Dr. Olivia Hart",
       "codeStatus": "Full Code",
       "emergencyContact": {
