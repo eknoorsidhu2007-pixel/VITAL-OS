@@ -40,6 +40,7 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
+tsconfig.tsbuildinfo
 next-env.d.ts
 
 # local chart store (created at runtime; seeded from demo roster)
