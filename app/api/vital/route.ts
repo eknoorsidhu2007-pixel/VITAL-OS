@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { ACCESS_RESTRICTED_MESSAGE, type VitalRole } from "@/lib/auth";
 import { listPatients } from "@/lib/patient-store";
 import {
   runVital,
@@ -17,6 +18,7 @@ interface VitalRequestBody {
   patientContext?: unknown;
   conversationHistory?: unknown;
   activePatientId?: unknown;
+  role?: unknown;
 }
 
 function parseHistory(raw: unknown): ConversationTurn[] {
@@ -31,6 +33,10 @@ function parseHistory(raw: unknown): ConversationTurn[] {
     out.push({ role, content: content.trim() });
   }
   return out;
+}
+
+function parseRole(raw: unknown): VitalRole | null {
+  return raw === "doctor" || raw === "staff" ? raw : null;
 }
 
 export async function POST(req: Request) {
@@ -69,11 +75,24 @@ export async function POST(req: Request) {
       ? body.activePatientId.trim()
       : null;
 
-  if (!process.env.GROQ_API_KEY?.trim()) {
+  const role = parseRole(body.role);
+  if (role !== "doctor") {
+    return NextResponse.json(
+      {
+        text: ACCESS_RESTRICTED_MESSAGE,
+        mode,
+        model: "access-control",
+        latencyMs: 0,
+      },
+      { headers: { "Cache-Control": "no-store" } }
+    );
+  }
+
+  if (!process.env.GEMINI_API_KEY?.trim()) {
     return NextResponse.json(
       {
         error:
-          "GROQ_API_KEY is not set on the server. Add it to .env.local and restart the dev server.",
+          "GEMINI_API_KEY is not set on the server. Add it to .env.local and restart the dev server.",
         code: "MISSING_API_KEY",
       },
       { status: 503 }
@@ -114,9 +133,9 @@ export async function GET() {
     {
       service: "VITAL OS",
       status: "online",
-      provider: "groq",
-      hasApiKey: Boolean(process.env.GROQ_API_KEY?.trim()),
-      models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
+      provider: "gemini",
+      hasApiKey: Boolean(process.env.GEMINI_API_KEY?.trim()),
+      models: ["gemini-1.5-flash"],
       rosterPatients: rosterCount,
     },
     { headers: { "Cache-Control": "no-store" } }

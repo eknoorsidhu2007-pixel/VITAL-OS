@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   BarChart3,
   BookText,
+  Check,
   ChevronRight,
   CircleDashed,
   CircleDot,
@@ -41,8 +42,10 @@ import {
   type VoiceHeroVisualHandle,
 } from "@/components/voice-hero-visual";
 import { VitalLogo } from "@/components/vital-logo";
+import { useAuth } from "@/components/auth-provider";
+import { ACCESS_RESTRICTED_MESSAGE } from "@/lib/auth";
 import type { ConversationTurn } from "@/lib/vital-llm";
-import type { DemoPatient } from "@/lib/demo-patients";
+import type { DemoMedication, DemoPatient } from "@/lib/demo-patients";
 import { patientToSnapshot } from "@/lib/demo-patients";
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -107,6 +110,7 @@ interface SR {
   onend: (() => void) | null;
   onstart: (() => void) | null;
   onaudiostart: (() => void) | null;
+  onspeechstart: (() => void) | null;
   onspeechend: (() => void) | null;
 }
 type SRCtor = new () => SR;
@@ -145,6 +149,27 @@ function fmtTime(ts: number): string {
 
 function uid(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+function readRecognitionTranscripts(ev: SREvent): {
+  interim: string;
+  finalDelta: string;
+} {
+  let interim = "";
+  let finalDelta = "";
+  for (let i = 0; i < ev.results.length; i++) {
+    const result = ev.results[i];
+    if (!result) continue;
+    const transcript = result[0]?.transcript ?? "";
+    if (result.isFinal) {
+      if (i >= ev.resultIndex) {
+        finalDelta += transcript;
+      }
+    } else {
+      interim += transcript;
+    }
+  }
+  return { interim, finalDelta };
 }
 
 type EncounterStatus =
@@ -389,12 +414,112 @@ function extractMedicationOrderIntent(
 }
 
 function detectStatusValue(command: string): ProblemStatus | null {
-  if (/ruled\s*out/i.test(command)) return "Ruled out";
-  if (/resolved/i.test(command)) return "Resolved";
-  if (/monitoring|monitor/i.test(command)) return "Monitoring";
-  if (/pending/i.test(command)) return "Pending";
-  if (/active/i.test(command)) return "Active";
+  const q = command.toLowerCase();
+  if (
+    /\b(ruled\s*out|rule\s*out|not the issue|not the problem|eliminated|excluded|negative for|clear of)\b/.test(
+      q
+    )
+  ) {
+    return "Ruled out";
+  }
+  if (
+    /\b(resolve|resolved|fixed|cleared|treated|better|no longer active|done|finished|handled|taken care of|all good|healed|cured|closed|close out|clear)\b/.test(
+      q
+    )
+  ) {
+    return "Resolved";
+  }
+  if (
+    /\b(monitor|monitoring|watch|watching|keep an eye on|observe|observing|under observation|stable but watching)\b/.test(
+      q
+    )
+  ) {
+    return "Monitoring";
+  }
+  if (
+    /\b(pending|uncertain|unsure|unclear|needs workup|waiting on results|inconclusive|undetermined)\b/.test(
+      q
+    )
+  ) {
+    return "Pending";
+  }
+  if (
+    /\b(active|reactivate|mark active|still ongoing|flaring|worsening|active again|open)\b/.test(
+      q
+    )
+  ) {
+    return "Active";
+  }
   return null;
+}
+
+function matchesStatusIntent(command: string): boolean {
+  const q = command.toLowerCase();
+  return (
+    /\b(deactivate|reactivate|close out|clear|mark as|set to|change to|flag as|update status|make|mark|change status|resolve|resolved|monitoring|ruled out|pending|active)\b/.test(
+      q
+    ) &&
+    /\b(diagnos|problem|status|hypertension|condition|fixed|diabetes|issues?)\b/.test(q)
+  );
+}
+
+function findProblemsInCommand(
+  command: string,
+  problems: EditableProblem[]
+): EditableProblem[] {
+  const normalized = normalizeProblemKey(command);
+  const matched = problems.filter((problem) =>
+    normalized.includes(normalizeProblemKey(problem.name))
+  );
+  if (matched.length > 0) return matched;
+  const segments = command
+    .split(/\band\b|,|;/i)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const fromSegments = new Map<string, EditableProblem>();
+  for (const segment of segments) {
+    const segmentKey = normalizeProblemKey(segment);
+    for (const problem of problems) {
+      const problemKey = normalizeProblemKey(problem.name);
+      if (segmentKey.includes(problemKey) || problemKey.includes(segmentKey)) {
+        fromSegments.set(problem.id, problem);
+      }
+    }
+  }
+  return Array.from(fromSegments.values());
+}
+
+function findAllPatientMatches(
+  transcript: string,
+  patients: DemoPatient[]
+): DemoPatient[] {
+  const found = new Map<string, DemoPatient>();
+  const segments = transcript
+    .split(/\s+and\s+|,\s*|\s*;\s*/i)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const queries = segments.length > 1 ? segments : [transcript];
+  for (const query of queries) {
+    for (const patient of findPatientMatches(query, patients)) {
+      found.set(patient.id, patient);
+    }
+  }
+  return Array.from(found.values());
+}
+
+function findFocusedPatientFromCommand(
+  command: string,
+  patients: DemoPatient[]
+): DemoPatient | null {
+  const backMatch = command.match(
+    /(?:go back to|return to|back to|switch to)\s+(.+)$/i
+  );
+  if (backMatch?.[1]) {
+    return findPatientMatches(backMatch[1], patients)[0] ?? null;
+  }
+  const matches = findAllPatientMatches(command, patients);
+  if (matches.length === 1) return matches[0];
+  return findPatientMatches(command, patients)[0] ?? null;
 }
 
 const ORDER_WORKFLOW_STEPS: Array<{ status: MedicationWorkflowStatus; delayMs: number }> = [
@@ -448,6 +573,70 @@ type RequestedPatientView = {
 
 type ProblemStatus = "Active" | "Resolved" | "Monitoring" | "Pending" | "Ruled out";
 
+const PROBLEM_STATUS_OPTIONS: ProblemStatus[] = [
+  "Active",
+  "Resolved",
+  "Monitoring",
+  "Pending",
+  "Ruled out",
+];
+
+function problemStatusBadgeVariant(status: ProblemStatus) {
+  if (status === "Resolved") return "notes" as const;
+  if (status === "Monitoring") return "problems" as const;
+  if (status === "Pending") return "allergies" as const;
+  if (status === "Ruled out") return "outline" as const;
+  return "medications" as const;
+}
+
+function patientHasClinicalRisk(patient: Pick<DemoPatient, "riskFlags">): boolean {
+  return Boolean(patient.riskFlags?.trim());
+}
+
+function patientHasAllergyIndicators(patient: Pick<DemoPatient, "allergies">): boolean {
+  return patient.allergies.length > 0;
+}
+
+function PatientClinicalIndicator({
+  patient,
+}: {
+  patient: Pick<DemoPatient, "riskFlags" | "allergies">;
+}) {
+  if (patientHasClinicalRisk(patient)) {
+    return <span className="ml-1 text-xs text-rose-600">●</span>;
+  }
+  if (patientHasAllergyIndicators(patient)) {
+    return <span className="ml-1 text-xs text-amber-400">●</span>;
+  }
+  return null;
+}
+
+type AdmissionStep =
+  | "chief_concern"
+  | "age_sex"
+  | "allergies"
+  | "medications"
+  | "contextual"
+  | "done";
+
+type AdmissionDraft = {
+  active: boolean;
+  data: Partial<DemoPatient>;
+  step: AdmissionStep;
+  allergiesCaptured: boolean;
+  medicationsCaptured: boolean;
+  contextualAnswered: boolean;
+};
+
+const EMPTY_ADMISSION: AdmissionDraft = {
+  active: false,
+  data: {},
+  step: "chief_concern",
+  allergiesCaptured: false,
+  medicationsCaptured: false,
+  contextualAnswered: false,
+};
+
 type EditableProblem = {
   id: string;
   name: string;
@@ -483,6 +672,7 @@ type VoiceCommandAction =
   | { kind: "patient_ambiguous"; matches: DemoPatient[] }
   | { kind: "patient_not_found"; query: string }
   | { kind: "close_chart" }
+  | { kind: "room_occupancy"; room: string; patients: DemoPatient[] }
   | { kind: "switch_patient"; patientId: string; sections: PatientFieldKey[] }
   | { kind: "open_sections"; patientId: string; sections: PatientFieldKey[] };
 
@@ -494,44 +684,644 @@ type ActivePage =
   | "analytics"
   | "settings";
 
+function normalizeRoomLabel(room: string): string {
+  return room
+    .trim()
+    .toLowerCase()
+    .replace(/^room\s+/, "")
+    .replace(/\s+/g, " ");
+}
+
+function roomsMatch(patientRoom: string, queryRoom: string): boolean {
+  const a = normalizeRoomLabel(patientRoom);
+  const b = normalizeRoomLabel(queryRoom);
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+function extractRoomQuery(transcript: string): string | null {
+  const q = transcript.trim();
+  const patterns = [
+    /(?:who(?:'s| is)|who's|who is|anyone|patients?)\s+(?:in|at)\s+(.+?)(?:\?|$)/i,
+    /(?:in|at)\s+((?:peds|pediatrics|room|trauma|isolation|observation)\s*[\w-]+)/i,
+    /(?:room|unit|bed)\s+([\w-]+(?:\s*[\w-]+)?)/i,
+  ];
+  for (const rx of patterns) {
+    const match = q.match(rx);
+    const room = match?.[1]?.trim();
+    if (room) return room;
+  }
+  return null;
+}
+
+function findPatientsByRoom(
+  patients: DemoPatient[],
+  roomQuery: string
+): DemoPatient[] {
+  return patients.filter((p) => roomsMatch(p.room, roomQuery));
+}
+
+function normalizeMrnToken(raw: string): string {
+  const compact = raw.trim().toUpperCase().replace(/\s+/g, "");
+  if (/^MRN-?\d+$/i.test(compact)) {
+    return compact.replace(/^MRN-?/i, "MRN-");
+  }
+  return compact;
+}
+
+function extractPatientNameHint(transcript: string): string | null {
+  const q = transcript.trim();
+  const patterns = [
+    /\b([a-z][a-z'-]+)'s\s+(?:chart|record|file|meds?|medications?|vitals?|allergies|labs?|notes?|encounter|symptoms?|problems?|conditions?)/i,
+    /(?:what(?:'s| is| are)|how is)\s+([a-z][a-z'-]+)\s+(?:on|for|taking|having|suffering from)/i,
+    /(?:pull up|open|show|display|bring up|view|get|find)\s+([a-z][a-z'-]+)(?:'s)?(?:\s+(?:chart|record|file))?/i,
+    /(?:for|about|on)\s+([a-z][a-z'-]+)(?:'s)?(?:\s+(?:chart|record|meds?|medications?|symptoms?|problems?))?$/i,
+    /\bpatient\s+([a-z][a-z'-]+)\b/i,
+    /what(?:'s| is) wrong with\s+([a-z][a-z'-]+)/i,
+    /what does\s+([a-z][a-z'-]+)\s+have/i,
+  ];
+  for (const rx of patterns) {
+    const match = q.match(rx);
+    const name = match?.[1]?.trim();
+    if (name && !/^(the|a|an|patient|chart|record|mrn)$/i.test(name)) {
+      return name;
+    }
+  }
+  return null;
+}
+
+function hasClinicalDataIntent(q: string): boolean {
+  if (
+    /pull up|show|open|find|view|bring up|display|review|what(?:'s| is| are)|whats|tell me|get|give me|i need|i want|how old|list|read|look up|load|check|who(?:'s| is)|anyone|patients? in|in peds|in room|show me|what(?:'s| is) wrong|suffering from|allergic to|blood work|test results|vital signs|clinical notes|what(?:'s| is) documented/.test(
+      q
+    )
+  ) {
+    return true;
+  }
+  return /chart|file|record|allerg|med|drug|prescription|problem|condition|symptom|note|vital|lab|emergency|care team|risk|patient|age|dob|blood|room|chief concern|mrn|triage|acuity|demographic|contact|consultant|encounter|visit|course|board|census|roster|treatment|numbers|stats|oxygen|reaction|everything|all info/.test(
+    q
+  );
+}
+
+const FIELD_INTENT_GROUPS: Array<{
+  key: PatientFieldKey;
+  patterns: RegExp[];
+}> = [
+  {
+    key: "diagnoses",
+    patterns: [
+      /\bproblems?\b/,
+      /\bdiagnos/i,
+      /\bconditions?\b/,
+      /\bsymptoms?\b/,
+      /what(?:'s| is) wrong/,
+      /what does .+ have/,
+      /what is .+ suffering from/,
+      /medical issues/,
+      /what(?:'s| are) .+ having/,
+    ],
+  },
+  {
+    key: "medications",
+    patterns: [
+      /\bmeds?\b/,
+      /\bmedications?\b/,
+      /\bdrugs?\b/,
+      /\bprescriptions?\b/,
+      /what is .+ taking/,
+      /what(?:'s| is) .+ on\b/,
+      /\btreatment\b/,
+    ],
+  },
+  {
+    key: "vitals",
+    patterns: [
+      /\bvitals?\b/,
+      /vital signs/,
+      /\bnumbers\b/,
+      /\bstats\b/,
+      /how is .+ doing/,
+      /blood pressure/,
+      /heart rate/,
+      /temperature/,
+      /\boxygen\b/,
+      /\bspo2\b/,
+      /\bpulse\b/,
+    ],
+  },
+  {
+    key: "allergies",
+    patterns: [
+      /\ballerg/i,
+      /allergic to/,
+      /what can(?:'|no)t .+ take/,
+      /drug reactions?/,
+    ],
+  },
+  {
+    key: "labs",
+    patterns: [
+      /\blabs?\b/,
+      /lab results/,
+      /blood work/,
+      /test results/,
+      /\bresults\b/,
+      /\bcbc\b/,
+      /\bbmp\b/,
+      /\bcreatinine\b/,
+      /\bbnp\b/,
+    ],
+  },
+  {
+    key: "notes",
+    patterns: [
+      /chart notes/,
+      /clinical notes/,
+      /what(?:'s| is) documented/,
+      /\bnotes\b/,
+    ],
+  },
+  {
+    key: "imaging",
+    patterns: [/\bimag/i, /\bxray\b/, /\bct\b/, /\bmri\b/, /\becho\b/, /\bekg\b/],
+  },
+  {
+    key: "social",
+    patterns: [/\bsocial\b/, /\bsmok/i, /\balcohol\b/],
+  },
+  {
+    key: "history",
+    patterns: [/family history/, /surgical history/, /immunization/],
+  },
+  {
+    key: "plan",
+    patterns: [
+      /\bplan\b/,
+      /next step/,
+      /\bconsult/i,
+      /follow[- ]?up/,
+      /\brisk\b/,
+      /\bencounter\b/,
+      /\bvisit\b/,
+      /ed course/,
+      /urgent course/,
+      /\bcourse\b/,
+    ],
+  },
+  {
+    key: "emergency_contact",
+    patterns: [/emergency contact/, /next of kin/, /contact info/],
+  },
+  {
+    key: "care_team",
+    patterns: [/care team/, /\bconsultants?\b/],
+  },
+  {
+    key: "risk_flags",
+    patterns: [/risk flags?/, /high risk/, /safety risk/],
+  },
+  {
+    key: "chief_concern",
+    patterns: [/chief concern/, /presenting complaint/, /chief complaint/],
+  },
+  {
+    key: "demographics",
+    patterns: [
+      /\bage\b/,
+      /how old/,
+      /years old/,
+      /\bdob\b/,
+      /date of birth/,
+      /birthday/,
+      /\bmrn\b/,
+      /medical record/,
+      /\broom\b/,
+      /blood type/,
+      /triag/,
+      /\bctas\b/,
+      /acuity/,
+      /code status/,
+      /\bpcp\b/,
+      /primary care/,
+      /insurance/,
+      /address/,
+    ],
+  },
+];
+
 function detectRequestedFields(transcript: string): PatientFieldKey[] {
   const q = transcript.toLowerCase();
   const hasInfoIntent =
-    /pull up|show|display|open|review|give me|i need|i want|tell me|what is|what are|what's|whats|chart|patient|mrn|record|info|how old|list|read (me|out)/.test(
+    /pull up|show|display|open|review|give me|i need|i want|tell me|what is|what are|what's|whats|chart|file|record|patient|mrn|info|how old|list|read (me|out)|look up|load|check|who(?:'s| is)|on for|taking|what(?:'s| is) wrong|suffering from|allergic to|blood work|test results|vital signs|clinical notes|what(?:'s| is) documented|everything|all info/.test(
       q
     );
   if (!hasInfoIntent) return [];
 
   const out = new Set<PatientFieldKey>();
-  if (/(med|meds|medication|rx|prescription)/.test(q)) out.add("medications");
-  if (/(allerg|allergy)/.test(q)) out.add("allergies");
-  if (/(vital|bp|heart rate|spo2|temp|temperature|pulse)/.test(q))
-    out.add("vitals");
-  if (/(lab|a1c|bmp|cbc|creatinine|bnp)/.test(q)) out.add("labs");
-  if (/(diagnos|problem|condition|assessment)/.test(q)) out.add("diagnoses");
-  if (/(imag|xray|ct|mri|echo|ekg|ultrasound)/.test(q)) out.add("imaging");
-  if (/(social|smok|alcohol|home|family support)/.test(q)) out.add("social");
-  if (/(history|surgical|family history|immunization)/.test(q))
-    out.add("history");
-  if (/(plan|next step|consult|follow[- ]?up|risk)/.test(q)) out.add("plan");
-  if (/(emergency contact|next of kin|contact info)/.test(q))
-    out.add("emergency_contact");
-  if (/(care team|team|consultant|consultants)/.test(q)) out.add("care_team");
-  if (/(risk flag|risk flags|high risk|safety risk)/.test(q))
-    out.add("risk_flags");
-  if (/(chief concern|presenting complaint|chief complaint)/.test(q))
-    out.add("chief_concern");
-  if (/(chart note|notes|note)/.test(q)) out.add("notes");
+  for (const group of FIELD_INTENT_GROUPS) {
+    if (group.patterns.some((pattern) => pattern.test(q))) {
+      out.add(group.key);
+    }
+  }
+
   if (
-    /\bage\b|how old|years old|\bdob\b|date of birth|birthday|\bmrn\b|medical record( number)?|\broom\b|\bblood type\b|triag|ctas|acuity|\bchief concern\b|presenting|complaint|\bsymptoms?\b|\bcode status\b|\bpcp\b|primary care|provider|insurance|address/.test(
+    /full chart|entire chart|complete chart|open (the )?full|everything|all info|full file|full record|all (of )?(the )?(chart|record|file)/.test(
       q
     )
   ) {
-    out.add("demographics");
+    out.add("overview");
   }
 
   if (out.size === 0) out.add("overview");
   return Array.from(out);
+}
+
+function isPatientDataRequest(command: string): boolean {
+  const q = command.trim().toLowerCase();
+  if (!q || isResetCommand(q) || /logout/.test(q)) return false;
+  if (isAdmitIntent(q) || isDischargeIntent(q)) return true;
+  if (
+    /how many patients|number of patients|patient count|roster|census|patients (on|in)|total patients/.test(
+      q
+    )
+  ) {
+    return true;
+  }
+  if (extractRoomQuery(command)) return true;
+  if (extractPatientNameHint(command)) return true;
+  if (/mrn[-\s]?\d+/i.test(command)) return true;
+  return hasClinicalDataIntent(q);
+}
+
+function isDischargeIntent(q: string): boolean {
+  return (
+    /\bdischarge\b/.test(q) ||
+    /\bsend\b.+\bhome\b/.test(q) ||
+    /\bbeing discharged\b/.test(q) ||
+    /\bremove\b.+\bfrom (the )?board\b/.test(q)
+  );
+}
+
+function isAdmitIntent(q: string): boolean {
+  return /^(?:admit|add patient|new patient)\b/.test(q) || /\badmit\b/.test(q);
+}
+
+function isAdmissionFinalizePhrase(command: string): boolean {
+  return /\b(that'?s all(?: i know)?(?: for now)?|that is all(?: i know)?(?: for now)?|that'?s it|nothing else|just admit(?: them)?|stop asking|go ahead and admit)\b/i.test(
+    command
+  );
+}
+
+function admissionFirstName(data: Partial<DemoPatient>): string {
+  return data.name?.trim().split(/\s+/)[0] ?? "the patient";
+}
+
+function normalizeAdmissionRoom(room: string): string {
+  const trimmed = room.trim();
+  if (!trimmed) return "Unassigned";
+  if (/^room\b/i.test(trimmed)) {
+    return trimmed.replace(/^room\s*/i, "Room ");
+  }
+  return `Room ${trimmed}`;
+}
+
+function normalizeMedicationSig(sig: string): string {
+  return sig
+    .replace(/\bonce a day\b/i, "PO daily")
+    .replace(/\btwice a day\b/i, "PO BID")
+    .replace(/\bthree times a day\b/i, "PO TID");
+}
+
+function parseAgeSex(text: string): { age?: number; sex?: string } {
+  const out: { age?: number; sex?: string } = {};
+  const ageMatch = text.match(/\b(\d{1,3})\s*(?:years?\s*old|y\.?o\.?)?\b/i);
+  if (ageMatch) out.age = Number(ageMatch[1]);
+  const sexMatch =
+    text.match(/\b(male|female|man|woman|nonbinary|non-binary|nb)\b/i) ??
+    text.match(/\b([mf])\b/i);
+  if (sexMatch) {
+    const token = sexMatch[1].toLowerCase();
+    if (token === "m" || token === "male" || token === "man") out.sex = "M";
+    else if (token === "f" || token === "female" || token === "woman") out.sex = "F";
+    else out.sex = sexMatch[1];
+  }
+  return out;
+}
+
+function parseAllergiesAnswer(text: string): string[] | null {
+  const q = text.trim();
+  if (!q) return null;
+  if (/^(no|none|no allergies|none known|nkda|nka|not aware of any)\b/i.test(q)) {
+    return [];
+  }
+  return q
+    .split(/\s*,\s*|\s+and\s+/i)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseMedicationsAnswer(text: string): DemoMedication[] | null {
+  const q = text.trim();
+  if (!q) return null;
+  if (/^(no|none|no medications|not on any|nkda|n\/a)\b/i.test(q)) return [];
+  const segment = q.replace(/^(?:just|only)\s+/i, "").trim();
+  const meds: DemoMedication[] = [];
+  const parts = segment.split(/\s*,\s*|\s+and\s+/i).filter(Boolean);
+  for (const part of parts) {
+    const medMatch =
+      part.match(/^(.+?)\s+(\d+(?:\.\d+)?\s*(?:mg|mcg|units?).*)$/i) ??
+      part.match(/^(.+?)\s*[-–:]\s*(.+)$/);
+    if (medMatch) {
+      meds.push({
+        name: medMatch[1].trim(),
+        sig: normalizeMedicationSig(medMatch[2].trim()),
+      });
+    } else {
+      meds.push({ name: part.trim(), sig: "As directed" });
+    }
+  }
+  return meds.length ? meds : null;
+}
+
+function parseChiefConcernAndRoom(text: string): {
+  chiefConcern?: string;
+  room?: string;
+} {
+  const trimmed = text.trim();
+  if (!trimmed) return {};
+  const roomMatch =
+    trimmed.match(/\b(?:room|in)\s+([A-Za-z0-9-]+)\b/i) ??
+    trimmed.match(/,\s*([A-Za-z0-9-]+)\s*$/);
+  let chiefConcern = trimmed;
+  let room: string | undefined;
+  if (roomMatch) {
+    room = normalizeAdmissionRoom(roomMatch[1]);
+    chiefConcern = trimmed.replace(roomMatch[0], "").replace(/,\s*$/, "").trim();
+  }
+  chiefConcern = chiefConcern.replace(/^(?:chief concern|presenting complaint)\s*[:,-]?\s*/i, "").trim();
+  return {
+    chiefConcern: chiefConcern || undefined,
+    room,
+  };
+}
+
+function parseEmergencyContactAnswer(text: string): DemoPatient["emergencyContact"] | null {
+  const trimmed = text.trim();
+  if (!trimmed || /^(no|none|not at this time|unknown)\b/i.test(trimmed)) {
+    return { name: "Not listed", relationship: "Not listed", phone: "Not listed" };
+  }
+  const phoneMatch = trimmed.match(/\b(\d{3}[-.\s]?\d{3}[-.\s]?\d{4})\b/);
+  const relationshipMatch = trimmed.match(/\b(spouse|partner|parent|mother|father|sibling|child|friend)\b/i);
+  const namePart = trimmed
+    .replace(phoneMatch?.[0] ?? "", "")
+    .replace(relationshipMatch?.[0] ?? "", "")
+    .replace(/\b(contact|is|the)\b/gi, "")
+    .trim();
+  return {
+    name: namePart || trimmed,
+    relationship: relationshipMatch?.[1] ?? "Contact",
+    phone: phoneMatch?.[1] ?? "Not listed",
+  };
+}
+
+function stripAdmissionPrefix(command: string): string {
+  return command
+    .replace(
+      /^(?:please\s+)?(?:admit|add patient|new patient)(?:\s+a)?(?:\s+new patient)?(?:\s+named)?[,:]?\s*/i,
+      ""
+    )
+    .trim();
+}
+
+function parseAdmissionBootstrap(command: string): Partial<DemoPatient> {
+  let rest = stripAdmissionPrefix(command);
+  rest = rest.replace(/^(?:a\s+)?new patient[,:]?\s*/i, "").trim();
+  const data: Partial<DemoPatient> = {};
+  if (!rest) return data;
+
+  const parts = rest.split(",").map((part) => part.trim()).filter(Boolean);
+  if (parts.length >= 3) {
+    data.name = parts[0];
+    data.chiefConcern = parts.slice(1, -1).join(", ") || parts[1];
+    data.room = normalizeAdmissionRoom(parts[parts.length - 1].replace(/^room\s*/i, ""));
+    return data;
+  }
+  if (parts.length === 2) {
+    data.name = parts[0];
+    const second = parts[1];
+    const concernRoom = parseChiefConcernAndRoom(second);
+    if (concernRoom.room) data.room = concernRoom.room;
+    if (concernRoom.chiefConcern) data.chiefConcern = concernRoom.chiefConcern;
+    if (!data.chiefConcern && !data.room) data.chiefConcern = second;
+    return data;
+  }
+
+  const token = parts[0] ?? rest;
+  const concernRoom = parseChiefConcernAndRoom(token);
+  if (concernRoom.room) {
+    data.room = concernRoom.room;
+    if (concernRoom.chiefConcern) data.chiefConcern = concernRoom.chiefConcern;
+    return data;
+  }
+  if (
+    /\b(pain|fever|nausea|injury|bleeding|shortness|chest|abdominal|seizure|trauma)\b/i.test(
+      token
+    )
+  ) {
+    data.chiefConcern = token;
+    return data;
+  }
+  data.name = token.replace(/[?.!]+$/, "").trim();
+  return data;
+}
+
+function isSeriousAdmissionCase(data: Partial<DemoPatient>): boolean {
+  const concern = (data.chiefConcern ?? "").toLowerCase();
+  const acuity = (data.triageAcuity ?? "").toLowerCase();
+  return (
+    /\b(ctas\s*[12]|critical|severe|unresponsive|stemi|stroke|chest pain|shortness of breath|sepsis|abdominal pain)\b/i.test(
+      concern
+    ) || /\bctas\s*[12]\b/.test(acuity)
+  );
+}
+
+function resolveAdmissionStep(draft: AdmissionDraft): AdmissionStep {
+  const data = draft.data;
+  if (!data.name?.trim() || !data.chiefConcern?.trim() || !data.room?.trim()) {
+    return "chief_concern";
+  }
+  if (data.age === undefined || !data.sex?.trim()) return "age_sex";
+  if (!draft.allergiesCaptured) return "allergies";
+  if (!draft.medicationsCaptured) return "medications";
+  if (!draft.contextualAnswered) return "contextual";
+  return "done";
+}
+
+function admissionPromptForStep(draft: AdmissionDraft): string {
+  const firstName = admissionFirstName(draft.data);
+  switch (draft.step) {
+    case "chief_concern":
+      if (draft.data.name?.trim()) {
+        return `Got it. What's ${firstName}'s chief concern and what room are they in?`;
+      }
+      return "What is the patient's name, chief concern, and room assignment?";
+    case "age_sex":
+      return `How old is ${firstName} and what's their sex?`;
+    case "allergies":
+      return "Any known allergies?";
+    case "medications":
+      return `Is ${firstName} on any medications?`;
+    case "contextual":
+      return isSeriousAdmissionCase(draft.data)
+        ? `Is there someone we should contact for ${firstName}?`
+        : `Do we need any medications or orders queued for ${firstName}?`;
+    default:
+      return "";
+  }
+}
+
+function mergeAdmissionAnswer(draft: AdmissionDraft, command: string): AdmissionDraft {
+  const data: Partial<DemoPatient> = { ...draft.data };
+  let allergiesCaptured = draft.allergiesCaptured;
+  let medicationsCaptured = draft.medicationsCaptured;
+  let contextualAnswered = draft.contextualAnswered;
+
+  const concernRoom = parseChiefConcernAndRoom(command);
+  if (concernRoom.chiefConcern) data.chiefConcern = concernRoom.chiefConcern;
+  if (concernRoom.room) data.room = concernRoom.room;
+  if (!data.name?.trim() && draft.step === "chief_concern") {
+    const stripped = command
+      .replace(/\b(?:room|in)\s+[A-Za-z0-9-]+\b/i, "")
+      .replace(/[?.!]+$/, "")
+      .trim();
+    if (stripped && !data.chiefConcern) {
+      data.name = stripped.split(",")[0]?.trim() ?? stripped;
+    }
+  }
+
+  const ageSex = parseAgeSex(command);
+  if (ageSex.age !== undefined) data.age = ageSex.age;
+  if (ageSex.sex) data.sex = ageSex.sex;
+
+  const allergies = parseAllergiesAnswer(command);
+  if (allergies !== null) {
+    data.allergies = allergies;
+    allergiesCaptured = true;
+  }
+
+  const medications = parseMedicationsAnswer(command);
+  if (medications !== null) {
+    data.medications = medications;
+    medicationsCaptured = true;
+  }
+
+  if (draft.step === "contextual" || contextualAnswered) {
+    const contact = parseEmergencyContactAnswer(command);
+    if (contact) data.emergencyContact = contact;
+    if (draft.step === "contextual" && command.trim()) {
+      contextualAnswered = true;
+    }
+  }
+
+  const next: AdmissionDraft = {
+    active: true,
+    data,
+    step: "chief_concern",
+    allergiesCaptured,
+    medicationsCaptured,
+    contextualAnswered,
+  };
+  next.step = resolveAdmissionStep(next);
+  return next;
+}
+
+function buildAdmissionPayload(data: Partial<DemoPatient>): Record<string, unknown> {
+  return {
+    name: data.name?.trim(),
+    room: data.room?.trim() || "Unassigned",
+    chiefConcern: data.chiefConcern?.trim() || "Not specified",
+    age: typeof data.age === "number" && Number.isFinite(data.age) ? data.age : 0,
+    sex: data.sex?.trim() || "Unknown",
+    allergies: data.allergies ?? [],
+    medications: data.medications ?? [],
+    triageAcuity: data.triageAcuity?.trim() || "CTAS 3",
+    emergencyContact: data.emergencyContact,
+    lastVisit: new Date().toISOString().slice(0, 10),
+  };
+}
+
+function buildAdmissionFinalizeMessage(
+  patient: DemoPatient,
+  opts: { early: boolean; roomLabel: string }
+): string {
+  if (opts.early) {
+    return `${patient.name} has been admitted. Chart created with the information provided. You can update the record later.`;
+  }
+  return `${patient.name} admitted to ${opts.roomLabel}. Chart created. MRN assigned: ${patient.mrn}.`;
+}
+
+function parseAdmitDetails(command: string): { name: string; room?: string } | null {
+  const boot = parseAdmissionBootstrap(command);
+  if (!boot.name?.trim()) return null;
+  return { name: boot.name.trim(), room: boot.room };
+}
+
+function matchUniqueFirstName(
+  transcript: string,
+  patients: DemoPatient[]
+): DemoPatient[] {
+  const skip = new Set([
+    "patient",
+    "the",
+    "what",
+    "whats",
+    "show",
+    "pull",
+    "open",
+    "find",
+    "view",
+    "give",
+    "tell",
+    "read",
+    "check",
+    "load",
+    "room",
+    "chart",
+    "record",
+    "file",
+    "meds",
+    "medications",
+    "vitals",
+    "labs",
+    "notes",
+    "problems",
+    "symptoms",
+    "allergies",
+    "doctor",
+    "staff",
+    "board",
+    "roster",
+    "home",
+    "being",
+    "from",
+    "with",
+    "about",
+    "does",
+    "have",
+    "having",
+    "wrong",
+    "taking",
+  ]);
+  const tokens = transcript.toLowerCase().match(/\b[a-z][a-z'-]{2,}\b/g) ?? [];
+  for (const token of tokens) {
+    if (skip.has(token)) continue;
+    const matches = patients.filter((p) => {
+      const first = p.name.toLowerCase().split(" ")[0] ?? "";
+      const preferred = (p.preferredName ?? "").toLowerCase();
+      return first === token || preferred === token;
+    });
+    if (matches.length === 1) return matches;
+  }
+  return [];
 }
 
 function buildRequestedPatientView(
@@ -664,20 +1454,57 @@ function findPatientMatches(transcript: string, patients: DemoPatient[]): DemoPa
   if (/first pediatric patient/.test(q)) {
     return patients.filter((p) => p.age < 18).slice(0, 1);
   }
-  const roomMatch = q.match(/patient in ([a-z]+\s*\d+)/i);
-  if (roomMatch) {
-    const room = roomMatch[1].trim().toLowerCase();
-    return patients.filter((p) => p.room.toLowerCase() === room);
+
+  const roomQuery = extractRoomQuery(transcript);
+  if (roomQuery) {
+    const roomMatches = findPatientsByRoom(patients, roomQuery);
+    if (roomMatches.length) return roomMatches;
   }
-  const mrnMatch = q.match(/mrn[-\s]?\d+/i)?.[0]?.toLowerCase();
-  if (mrnMatch) {
-    return patients.filter((p) => p.mrn.toLowerCase() === mrnMatch);
+
+  const roomMatch = q.match(/(?:patient|anyone|who(?:'s| is))\s+(?:in|at)\s+(.+?)(?:\?|$)/i);
+  if (roomMatch?.[1]) {
+    const roomMatches = findPatientsByRoom(patients, roomMatch[1]);
+    if (roomMatches.length) return roomMatches;
   }
+
+  const mrnToken =
+    transcript.match(/\bmrn[-\s]?\d{3,}\b/i)?.[0] ??
+    transcript.match(/\b\d{6,}\b/)?.[0];
+  if (mrnToken) {
+    const normalized = normalizeMrnToken(mrnToken);
+    return patients.filter(
+      (p) =>
+        normalizeMrnToken(p.mrn) === normalized ||
+        p.mrn.toLowerCase().replace(/\s+/g, "") === normalized.toLowerCase()
+    );
+  }
+
+  const nameHint = extractPatientNameHint(transcript);
+  if (nameHint) {
+    const hint = nameHint.toLowerCase();
+    const hinted = patients.filter((p) => {
+      const names = [p.name, p.preferredName ?? ""].map((n) => n.toLowerCase());
+      return names.some(
+        (name) =>
+          name.includes(hint) ||
+          name.split(" ").some((part) => part === hint || part.startsWith(hint))
+      );
+    });
+    if (hinted.length) return hinted;
+  }
+
   const fullMatches = patients.filter((p) => q.includes(p.name.toLowerCase()));
   if (fullMatches.length) return fullMatches;
+
+  const uniqueFirst = matchUniqueFirstName(transcript, patients);
+  if (uniqueFirst.length) return uniqueFirst;
+
   const tokenMatches = patients.filter((p) => {
-    const parts = p.name.toLowerCase().split(" ");
-    return parts.some((part) => q.includes(part));
+    const parts = [
+      ...p.name.toLowerCase().split(" "),
+      ...(p.preferredName ?? "").toLowerCase().split(" "),
+    ].filter(Boolean);
+    return parts.some((part) => part.length > 2 && q.includes(part));
   });
   return tokenMatches;
 }
@@ -698,9 +1525,9 @@ function buildVoiceSummaryForChartOpen(
     `${patient.name} is ${patient.age} years old, ${patient.sex}. Date of birth ${patient.dob}. MRN ${patient.mrn}. Room ${patient.room}. Blood type ${patient.bloodType}. Triage acuity ${patient.triageAcuity}. Chief concern: ${patient.chiefConcern}.`;
 
   const wantsFull =
-    sections.includes("overview") ||
-    sections.length >= 6 ||
-    /full chart|entire chart|complete chart|everything (on|in) (the )?chart/.test(q);
+    /full chart|entire chart|complete chart|everything|all info|full file|full record|all (of )?(the )?(chart|record|file)/.test(
+      q
+    ) || (sections.includes("overview") && sections.length > 1);
 
   if (wantsFull) {
     add(sayDemographics());
@@ -754,10 +1581,7 @@ function buildVoiceSummaryForChartOpen(
     }
   }
 
-  if (
-    sections.includes("vitals") ||
-    /vital|bp\b|blood pressure|heart rate|spo2|pulse|temp\b|temperature/i.test(q)
-  ) {
+  if (sections.includes("vitals")) {
     const vit = Object.entries(patient.vitals)
       .map(([k, v]) => `${k} ${v}`)
       .join(", ");
@@ -773,7 +1597,7 @@ function buildVoiceSummaryForChartOpen(
   if (sections.includes("labs")) {
     add(`Labs: ${patient.recentLabs || "not listed"}.`);
   }
-  if (sections.includes("diagnoses") || /\bproblem|diagnos/i.test(q)) {
+  if (sections.includes("diagnoses")) {
     const probLines = editableProblems
       .map((x) => `${x.name}, status ${x.status}`)
       .join("; ");
@@ -834,7 +1658,16 @@ function parseVoiceCommand(
     return { kind: "close_chart" };
   }
 
-  const switchMatch = q.match(/switch to (.+)$/);
+  const roomQuery = extractRoomQuery(transcript);
+  if (
+    roomQuery &&
+    /who(?:'s| is)|anyone|patients? in|who is in|in peds|in room|show (me )?who/.test(q)
+  ) {
+    const occupants = findPatientsByRoom(patients, roomQuery);
+    return { kind: "room_occupancy", room: roomQuery, patients: occupants };
+  }
+
+  const switchMatch = q.match(/(?:switch to|go back to|return to|back to)\s+(.+)$/);
   if (switchMatch) {
     const matches = findPatientMatches(switchMatch[1], patients);
     if (matches.length > 1) return { kind: "patient_ambiguous", matches };
@@ -843,19 +1676,15 @@ function parseVoiceCommand(
     return { kind: "switch_patient", patientId: target.id, sections: ["overview"] };
   }
 
-  const hasChartIntent =
-    /pull up|show|open|find|view|bring up|display|review|what is|what are|what's|whats|tell me|get|give me|i need|i want|how old|list|read/.test(
-      q
-    ) &&
-    /chart|allerg|med|problem|note|vital|lab|emergency|care team|risk|patient|age|dob|blood|room|chief concern|mrn|symptom|triage|acuity|demographic|contact|consultant/.test(
-      q
-    );
-  if (!hasChartIntent) return { kind: "none" };
+  if (!hasClinicalDataIntent(q)) return { kind: "none" };
 
-  const explicitNameMatch = q.match(/for (.+)$/);
+  const nameHint = extractPatientNameHint(transcript);
+  const explicitNameMatch =
+    transcript.match(/\bfor\s+(.+?)(?:'s)?(?:\s+(?:chart|record|meds?|medications?|vitals?|allergies|labs?|notes?|encounter))?$/i) ??
+    (nameHint ? [transcript, nameHint] : null);
   const matches = explicitNameMatch
     ? findPatientMatches(explicitNameMatch[1], patients)
-    : findPatientMatches(q, patients);
+    : findPatientMatches(transcript, patients);
   if (matches.length > 1) return { kind: "patient_ambiguous", matches };
   const explicit = matches[0] ?? null;
   const active =
@@ -864,14 +1693,14 @@ function parseVoiceCommand(
   if (!target) {
     return {
       kind: "patient_not_found",
-      query: explicitNameMatch?.[1] ?? "requested patient",
+      query: explicitNameMatch?.[1] ?? nameHint ?? "requested patient",
     };
   }
 
   const sections = detectRequestedFields(transcript);
   let resolvedSections: PatientFieldKey[];
   if (
-    /full chart|entire chart|complete chart|open (the )?full|everything (on|in) (the )?chart/i.test(
+    /full chart|entire chart|complete chart|open (the )?full|everything|all info|full file|full record|all (of )?(the )?(chart|record|file)/i.test(
       q
     )
   ) {
@@ -905,12 +1734,14 @@ function parseVoiceCommand(
  * ────────────────────────────────────────────────────────────────────────── */
 
 export default function VitalOsClient() {
+  const { role, logout } = useAuth();
   const [systemState, setSystemState] = React.useState<SystemState>("idle");
   const [mode, setMode] = React.useState<VitalMode>("general");
   const [emergencyArmed, setEmergencyArmed] = React.useState(false);
 
   const [interimTranscript, setInterimTranscript] = React.useState("");
   const [finalTranscript, setFinalTranscript] = React.useState("");
+  const [heardPreview, setHeardPreview] = React.useState("");
   const [lastSubmittedTranscript, setLastSubmittedTranscript] =
     React.useState("");
 
@@ -935,11 +1766,27 @@ export default function VitalOsClient() {
   );
   const [isChartLoading, setIsChartLoading] = React.useState(false);
   const [pendingOrders, setPendingOrders] = React.useState<PendingOrder[]>([]);
+  const [ordersPanelVisible, setOrdersPanelVisible] = React.useState(false);
+  const ordersFadeTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ordersPanelClearTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const [problemStateByPatient, setProblemStateByPatient] = React.useState<
     Record<string, EditableProblem[]>
   >({});
+  const [problemStatusFlashId, setProblemStatusFlashId] = React.useState<string | null>(null);
   const [orderNotice, setOrderNotice] = React.useState<string | null>(null);
   const [openPatientTabIds, setOpenPatientTabIds] = React.useState<string[]>([]);
+  const [dischargeConfirmId, setDischargeConfirmId] = React.useState<string | null>(null);
+  const [admitFormOpen, setAdmitFormOpen] = React.useState(false);
+  const [admitDraft, setAdmitDraft] = React.useState({
+    name: "",
+    room: "",
+    age: "",
+    sex: "",
+    chiefConcern: "",
+    triageAcuity: "CTAS 3",
+  });
+  const [admissionConversation, setAdmissionConversation] =
+    React.useState<AdmissionDraft>(EMPTY_ADMISSION);
   const [requestedPatientView, setRequestedPatientView] =
     React.useState<RequestedPatientView | null>(null);
   const conversationTurnsRef = React.useRef<ConversationTurn[]>([]);
@@ -986,6 +1833,7 @@ export default function VitalOsClient() {
   );
   const silenceTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const scheduleSilenceSubmitRef = React.useRef<() => void>(() => {});
+  const resumeVoiceCaptureRef = React.useRef<() => void>(() => {});
   const systemStateRef = React.useRef<SystemState>("idle");
   const bargeInRef = React.useRef<() => void>(() => {});
   const lastBargeAtRef = React.useRef(0);
@@ -1134,6 +1982,48 @@ export default function VitalOsClient() {
   }, [pendingOrders, supportsTts, voiceEnabled]);
 
   React.useEffect(() => {
+    const clearTimers = () => {
+      if (ordersFadeTimerRef.current) {
+        globalThis.clearTimeout(ordersFadeTimerRef.current);
+        ordersFadeTimerRef.current = null;
+      }
+      if (ordersPanelClearTimerRef.current) {
+        globalThis.clearTimeout(ordersPanelClearTimerRef.current);
+        ordersPanelClearTimerRef.current = null;
+      }
+    };
+
+    if (pendingOrders.length === 0) {
+      clearTimers();
+      setOrdersPanelVisible(false);
+      return;
+    }
+
+    setOrdersPanelVisible(true);
+    const allDelivered = pendingOrders.every((order) => order.status === "Delivered");
+    if (!allDelivered) {
+      clearTimers();
+      return;
+    }
+
+    clearTimers();
+    ordersFadeTimerRef.current = globalThis.setTimeout(() => {
+      setOrdersPanelVisible(false);
+      ordersPanelClearTimerRef.current = globalThis.setTimeout(() => {
+        setPendingOrders([]);
+      }, 450);
+    }, 5000);
+
+    return clearTimers;
+  }, [pendingOrders]);
+
+  React.useEffect(() => {
+    if (!problemStatusFlashId) return;
+    const timer = globalThis.setTimeout(() => setProblemStatusFlashId(null), 900);
+    return () => globalThis.clearTimeout(timer);
+  }, [problemStatusFlashId]);
+
+  React.useEffect(() => {
     if (!orderNotice) return;
     const timer = globalThis.setTimeout(() => setOrderNotice(null), 2600);
     return () => globalThis.clearTimeout(timer);
@@ -1225,6 +2115,16 @@ export default function VitalOsClient() {
     bargeInRef.current = bargeIn;
   }, [bargeIn]);
 
+  const updateHeardPreview = React.useCallback((final: string, interim: string) => {
+    const line = `${final} ${interim}`.trim();
+    setHeardPreview(line);
+  }, []);
+  const updateHeardPreviewRef = React.useRef(updateHeardPreview);
+
+  React.useEffect(() => {
+    updateHeardPreviewRef.current = updateHeardPreview;
+  }, [updateHeardPreview]);
+
   const armSilenceSubmit = React.useCallback(() => {
     if (!voiceSessionActiveRef.current) return;
     if (systemStateRef.current === "processing") return;
@@ -1235,13 +2135,27 @@ export default function VitalOsClient() {
       if (systemStateRef.current === "processing") return;
       const text = (finalRef.current + " " + interimRef.current).trim();
       if (!text) return;
+      setLastSubmittedTranscript(text);
+      setHeardPreview(text);
       setFinalTranscript("");
       finalRef.current = "";
       setInterimTranscript("");
       interimRef.current = "";
       void submitRef.current(text);
-    }, 1400);
+    }, 1600);
   }, []);
+
+  const resumeVoiceCapture = React.useCallback(() => {
+    if (!voiceSessionActiveRef.current) return;
+    globalThis.setTimeout(() => {
+      if (!voiceSessionActiveRef.current) return;
+      startListeningContinueRef.current({ hard: false });
+    }, 400);
+  }, []);
+
+  React.useEffect(() => {
+    resumeVoiceCaptureRef.current = resumeVoiceCapture;
+  }, [resumeVoiceCapture]);
 
   React.useEffect(() => {
     scheduleSilenceSubmitRef.current = armSilenceSubmit;
@@ -1284,15 +2198,12 @@ export default function VitalOsClient() {
       setError(null);
     };
 
+    rec.onaudiostart = () => {
+      setSystemState("listening");
+    };
+
     rec.onresult = (ev) => {
-      let interim = "";
-      let finalDelta = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        const r = ev.results[i];
-        const txt = r[0]?.transcript ?? "";
-        if (r.isFinal) finalDelta += txt;
-        else interim += txt;
-      }
+      const { interim, finalDelta } = readRecognitionTranscripts(ev);
 
       const heard = Boolean(finalDelta.trim() || interim.trim());
       const ttsOn =
@@ -1312,6 +2223,7 @@ export default function VitalOsClient() {
         setInterimTranscript("");
         finalRef.current = "";
         interimRef.current = "";
+        updateHeardPreviewRef.current("", "");
       } else if (ttsOn) {
         const finalLen = finalDelta.trim().length;
         const interimLen = interim.trim().length;
@@ -1325,15 +2237,15 @@ export default function VitalOsClient() {
         }
       }
 
+      let nextFinal = finalRef.current;
       if (finalDelta) {
-        setFinalTranscript((prev) => {
-          const next = (prev ? prev + " " : "") + finalDelta.trim();
-          finalRef.current = next;
-          return next;
-        });
+        nextFinal = (nextFinal ? `${nextFinal} ` : "") + finalDelta.trim();
+        finalRef.current = nextFinal;
+        setFinalTranscript(nextFinal);
       }
-      setInterimTranscript(interim);
       interimRef.current = interim;
+      setInterimTranscript(interim);
+      updateHeardPreviewRef.current(nextFinal, interim);
 
       if (
         heard &&
@@ -1359,7 +2271,9 @@ export default function VitalOsClient() {
         msg =
           "Microphone permission was denied. Allow mic access in your browser to use VITAL OS.";
       } else if (code === "no-speech") {
-        /* Harmless gap between phrases while continuous listening. */
+        if (listeningIntentRef.current && voiceSessionActiveRef.current) {
+          resumeVoiceCaptureRef.current();
+        }
         return;
       } else if (code === "audio-capture") {
         listeningIntentRef.current = false;
@@ -1367,11 +2281,12 @@ export default function VitalOsClient() {
         setVoiceSessionLive(false);
         msg = "No microphone detected. Connect a mic and try again.";
       } else if (code === "network") {
-        listeningIntentRef.current = false;
-        voiceSessionActiveRef.current = false;
-        setVoiceSessionLive(false);
         msg =
           "Speech recognition needs an internet connection (Chrome sends audio to Google). Check your network.";
+        setError(msg);
+        setSystemState("listening");
+        resumeVoiceCaptureRef.current();
+        return;
       } else {
         listeningIntentRef.current = false;
         voiceSessionActiveRef.current = false;
@@ -1384,7 +2299,10 @@ export default function VitalOsClient() {
 
     rec.onend = () => {
       recognitionActiveRef.current = false;
-      setInterimTranscript("");
+      if (!listeningIntentRef.current) {
+        setInterimTranscript("");
+        interimRef.current = "";
+      }
 
       if (ignoreNextEndRef.current) {
         ignoreNextEndRef.current = false;
@@ -1421,14 +2339,7 @@ export default function VitalOsClient() {
       if (listeningIntentRef.current) {
         globalThis.setTimeout(() => {
           if (!listeningIntentRef.current) return;
-          const r = recognitionRef.current;
-          if (!r) return;
-          try {
-            r.start();
-          } catch {
-            listeningIntentRef.current = false;
-            setSystemState((s) => (s === "listening" ? "idle" : s));
-          }
+          resumeVoiceCaptureRef.current();
         }, 200);
         return;
       }
@@ -1504,8 +2415,6 @@ export default function VitalOsClient() {
       disposeRecognition();
       await new Promise<void>((r) => setTimeout(r, 80));
 
-      /* Do NOT call getUserMedia here — holding a MediaStream often blocks Web Speech on Windows/Chrome. */
-
       const rec = mountRecognition();
       if (!rec) {
         listeningIntentRef.current = false;
@@ -1516,6 +2425,7 @@ export default function VitalOsClient() {
       finalRef.current = "";
       setInterimTranscript("");
       interimRef.current = "";
+      setHeardPreview("");
       shouldSubmitOnEndRef.current = false;
       resumeStartAfterEndRef.current = false;
 
@@ -1593,6 +2503,7 @@ export default function VitalOsClient() {
     interimRef.current = "";
     setLastSubmittedTranscript("");
     setLastCommand("System ready");
+    setAdmissionConversation(EMPTY_ADMISSION);
   }, []);
 
   const pushLocalAssistantResponse = React.useCallback(
@@ -1628,6 +2539,9 @@ export default function VitalOsClient() {
       );
       if (voiceEnabled && supportsTts) {
         speakRef.current(text);
+      } else {
+        setSystemState("idle");
+        resumeVoiceCaptureRef.current();
       }
     },
     [supportsTts, voiceEnabled]
@@ -1660,20 +2574,133 @@ export default function VitalOsClient() {
 
       if (isResetCommand(lower) || /logout/.test(lower)) {
         resetSession();
+        logout();
         pushLocalAssistantResponse(command, "Session ended. Panels cleared.");
         return true;
       }
 
-      const statusIntent =
-        /make|mark|change status|resolve|resolved|monitoring|ruled out|pending|active/i.test(
-          command
-        ) && /diagnos|problem|status|hypertension|condition|fixed/i.test(command);
-      if (statusIntent) {
-        const status = detectStatusValue(command);
-        const matches = findPatientMatches(command, patients);
+      if (role === "staff" && isPatientDataRequest(command)) {
+        pushLocalAssistantResponse(command, ACCESS_RESTRICTED_MESSAGE);
+        return true;
+      }
+
+      const finalizeAdmissionConversation = async (
+        draft: AdmissionDraft,
+        early: boolean
+      ) => {
+        if (!draft.data.name?.trim()) {
+          pushLocalAssistantResponse(
+            command,
+            "Please provide the patient name before admitting."
+          );
+          setAdmissionConversation(EMPTY_ADMISSION);
+          return;
+        }
+        const res = await fetch("/api/patients", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildAdmissionPayload(draft.data)),
+        });
+        if (!res.ok) {
+          pushLocalAssistantResponse(command, "Admit failed. Try again.");
+          return;
+        }
+        const body = (await res.json().catch(() => ({}))) as { patient?: DemoPatient };
+        await refreshPatients();
+        setAdmissionConversation(EMPTY_ADMISSION);
+        const created = body.patient;
+        const roomLabel = created?.room ?? draft.data.room ?? "Unassigned";
+        const message = created
+          ? buildAdmissionFinalizeMessage(created, { early, roomLabel })
+          : `${draft.data.name} has been admitted.`;
+        pushLocalAssistantResponse(command, message);
+      };
+
+      if (admissionConversation.active) {
+        if (isAdmissionFinalizePhrase(command)) {
+          const merged = mergeAdmissionAnswer(admissionConversation, command);
+          await finalizeAdmissionConversation(merged, true);
+          return true;
+        }
+        const merged = mergeAdmissionAnswer(admissionConversation, command);
+        if (merged.step === "done") {
+          await finalizeAdmissionConversation(merged, false);
+          return true;
+        }
+        setAdmissionConversation(merged);
+        pushLocalAssistantResponse(command, admissionPromptForStep(merged));
+        return true;
+      }
+
+      const focusedPatient = findFocusedPatientFromCommand(command, patients);
+      if (focusedPatient) {
+        setSelectedPatientId(focusedPatient.id);
+      }
+
+      if (isDischargeIntent(lower)) {
+        const matches = findAllPatientMatches(command, patients);
         const active =
           (selectedPatientId && patients.find((p) => p.id === selectedPatientId)) || null;
-        const target = matches[0] ?? active;
+        const targets = matches.length > 0 ? matches : active ? [active] : [];
+        if (targets.length === 0) {
+          pushLocalAssistantResponse(
+            command,
+            "Please confirm which patient should be discharged."
+          );
+          return true;
+        }
+        for (const target of targets) {
+          const res = await fetch(`/api/patients/${encodeURIComponent(target.id)}`, {
+            method: "DELETE",
+          });
+          if (!res.ok) {
+            pushLocalAssistantResponse(command, "Discharge failed. Try again.");
+            return true;
+          }
+          if (selectedPatientId === target.id) {
+            setRequestedPatientView(null);
+            setActiveRequestedSections([]);
+            setSelectedPatientId(null);
+          }
+          setOpenPatientTabIds((prev) => prev.filter((tabId) => tabId !== target.id));
+        }
+        await refreshPatients();
+        pushLocalAssistantResponse(
+          command,
+          `Discharged: ${targets.map((target) => target.name).join(", ")}. Roster updated.`
+        );
+        return true;
+      }
+
+      if (isAdmitIntent(lower)) {
+        let draft: AdmissionDraft = {
+          active: true,
+          data: parseAdmissionBootstrap(command),
+          step: "chief_concern",
+          allergiesCaptured: false,
+          medicationsCaptured: false,
+          contextualAnswered: false,
+        };
+        draft = mergeAdmissionAnswer(draft, command);
+        if (draft.step === "done") {
+          await finalizeAdmissionConversation(draft, false);
+          return true;
+        }
+        setAdmissionConversation(draft);
+        pushLocalAssistantResponse(command, admissionPromptForStep(draft));
+        return true;
+      }
+
+      if (matchesStatusIntent(command)) {
+        const status = detectStatusValue(command);
+        const patientMatches = findAllPatientMatches(command, patients);
+        const active =
+          (selectedPatientId && patients.find((p) => p.id === selectedPatientId)) || null;
+        const target =
+          focusedPatient ??
+          (patientMatches.length === 1
+            ? patientMatches[0]
+            : findPatientMatches(command, patients)[0] ?? active);
         if (!target || !status) {
           pushLocalAssistantResponse(
             command,
@@ -1681,36 +2708,33 @@ export default function VitalOsClient() {
           );
           return true;
         }
-        const explicitProblem = command.match(
-          /(?:for|status for|mark|make|resolve)\s+(.+?)\s+(?:as|to)\s+(?:active|resolved|monitoring|pending|ruled out)/i
-        )?.[1];
         const existingProblems = problemStateByPatient[target.id] ?? [];
-        const problem = explicitProblem
-          ? existingProblems.find((d) =>
-              normalizeProblemKey(d.name).includes(normalizeProblemKey(explicitProblem))
-            )
-          : existingProblems.find(
-              (d) =>
-                normalizeProblemKey(command).includes(normalizeProblemKey(d.name)) ||
-                normalizeProblemKey(d.name).includes("hypertension")
-            );
-        if (!problem) {
+        const problems = findProblemsInCommand(command, existingProblems);
+        if (problems.length === 0) {
           pushLocalAssistantResponse(command, "Please confirm which problem should be updated.");
           return true;
         }
+        const problemIds = new Set(problems.map((problem) => problem.id));
         setProblemStateByPatient((prev) => ({
           ...prev,
           [target.id]: (prev[target.id] ?? []).map((item) =>
-            item.id === problem.id ? { ...item, status } : item
+            problemIds.has(item.id) ? { ...item, status } : item
           ),
         }));
         if (selectedPatientId !== target.id) {
           setSelectedPatientId(target.id);
         }
         void openRequestedView(target, ["diagnoses"]);
+        const problemLabel =
+          problems.length === 1
+            ? problems[0].name
+            : `${problems
+                .slice(0, -1)
+                .map((problem) => problem.name)
+                .join(", ")} and ${problems[problems.length - 1].name}`;
         pushLocalAssistantResponse(
           command,
-          `Updated. ${problem.name} is now marked ${status.toLowerCase()} for ${target.name}.`
+          `Updated: ${problemLabel} marked as ${status.toLowerCase()} for ${target.name}.`
         );
         return true;
       }
@@ -1746,6 +2770,30 @@ export default function VitalOsClient() {
         if (action.kind === "close_chart") {
           setRequestedPatientView(null);
           setActiveRequestedSections([]);
+          return true;
+        }
+        if (action.kind === "switch_patient") {
+          const patient = patients.find((p) => p.id === action.patientId);
+          if (!patient) {
+            setError("Patient not found.");
+            return true;
+          }
+          setSelectedPatientId(patient.id);
+          setOpenPatientTabIds((prev) =>
+            prev.includes(patient.id) ? prev : [...prev, patient.id].slice(-5)
+          );
+          pushLocalAssistantResponse(command, `Active chart set to ${patient.name}.`);
+          return true;
+        }
+        if (action.kind === "room_occupancy") {
+          const label = normalizeRoomLabel(action.room);
+          const spoken =
+            action.patients.length === 0
+              ? `No patients are listed in ${label}.`
+              : `Patients in ${label}: ${action.patients
+                  .map((p) => `${p.name} (${p.mrn})`)
+                  .join("; ")}.`;
+          pushLocalAssistantResponse(command, spoken);
           return true;
         }
         const patient = patients.find((p) => p.id === action.patientId);
@@ -1817,11 +2865,16 @@ export default function VitalOsClient() {
     [
       patients,
       selectedPatientId,
+      admissionConversation,
       resetSession,
       activeRequestedSections,
       openRequestedView,
       pushLocalAssistantResponse,
       problemStateByPatient,
+      role,
+      refreshPatients,
+      resumeVoiceCapture,
+      logout,
     ]
   );
 
@@ -1845,8 +2898,12 @@ export default function VitalOsClient() {
       const handled = await handleClinicalCommand(transcript);
       if (handled) {
         setSystemState("idle");
+        resumeVoiceCapture();
         return;
       }
+
+      const routedPatientId =
+        findFocusedPatientFromCommand(transcript, patients)?.id ?? selectedPatientId;
 
       abortRef.current?.abort();
       const ctrl = new AbortController();
@@ -1861,7 +2918,8 @@ export default function VitalOsClient() {
             mode: finalMode,
             patientContext: overrideContext ?? patientSnapshot ?? "",
             conversationHistory: conversationTurnsRef.current,
-            activePatientId: selectedPatientId,
+            activePatientId: routedPatientId,
+            role: role ?? "doctor",
           }),
           signal: ctrl.signal,
         });
@@ -1927,6 +2985,12 @@ export default function VitalOsClient() {
           err instanceof Error ? err.message : "Unknown VITAL OS error.";
         setError(message);
         setSystemState("error");
+        if (voiceSessionActiveRef.current) {
+          globalThis.setTimeout(
+            () => startListeningContinueRef.current({ hard: false }),
+            600
+          );
+        }
         setAudit((prev) =>
           [
             {
@@ -1953,6 +3017,8 @@ export default function VitalOsClient() {
       voiceEnabled,
       refreshPatients,
       handleClinicalCommand,
+      role,
+      resumeVoiceCapture,
     ]
   );
 
@@ -2509,7 +3575,7 @@ export default function VitalOsClient() {
                           ? "Processing clinician command..."
                           : "System ready"}
                 </p>
-                <div className="mt-2 h-8 overflow-hidden rounded-xl border border-blue-100 bg-white px-2">
+                <div className="mt-2 h-8 overflow-hidden rounded-xl border border-slate-200 bg-white px-2">
                   <div className="flex h-full items-end gap-1">
                     {waveformBars.map((h, i) => (
                       <span
@@ -2520,15 +3586,19 @@ export default function VitalOsClient() {
                     ))}
                   </div>
                 </div>
-                <p className="mt-2 text-xs text-slate-500">
+                <p className="mt-2 text-xs text-slate-600">
                   Last heard:{" "}
-                  <span className="text-slate-700">
-                    {interimTranscript.trim() ||
+                  <span className="font-medium text-slate-900">
+                    {heardPreview.trim() ||
+                      interimTranscript.trim() ||
                       finalTranscript.trim() ||
                       lastSubmittedTranscript.trim() ||
                       "Listening for clinician command..."}
                   </span>
                 </p>
+                {error ? (
+                  <p className="mt-2 text-xs text-red-600">{error}</p>
+                ) : null}
                 {typedCommandOpen && (
                   <input
                     value={typedCommand}
@@ -2603,17 +3673,124 @@ export default function VitalOsClient() {
             <div className="grid gap-3">
               {activePage === "patients" && (
                 <div className="rounded-xl border border-[#e3edf9] bg-white p-4 shadow-sm">
-                  <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                     <p className="text-sm font-semibold text-slate-900">Patient Roster</p>
-                    <input
-                      value={patientSearch}
-                      onChange={(e) => setPatientSearch(e.target.value)}
-                      placeholder="Search name, MRN, room..."
-                      className="w-64 rounded-lg border border-slate-200 px-3 py-1.5 text-sm outline-none focus:border-blue-300"
-                    />
+                    <motion.div layout className="flex flex-wrap items-center gap-2">
+                      <input
+                        value={patientSearch}
+                        onChange={(e) => setPatientSearch(e.target.value)}
+                        placeholder="Search name, MRN, room..."
+                        className="w-64 rounded-lg border border-slate-200 px-3 py-1.5 text-sm text-slate-900 outline-none focus:border-blue-300"
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setAdmitFormOpen((open) => !open)}
+                      >
+                        Admit Patient
+                      </Button>
+                    </motion.div>
                   </div>
+                  <AnimatePresence initial={false}>
+                    {admitFormOpen && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="mb-3 overflow-hidden rounded-xl border border-[#e3edf9] bg-[#f7fbff] p-3"
+                      >
+                        <motion.div layout className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                          {(
+                            [
+                              ["name", "Name", "text"],
+                              ["room", "Room", "text"],
+                              ["age", "Age", "number"],
+                              ["sex", "Sex", "text"],
+                              ["chiefConcern", "Chief Concern", "text"],
+                            ] as const
+                          ).map(([key, label, type]) => (
+                            <label key={key} className="text-xs font-medium text-slate-700">
+                              {label}
+                              <input
+                                type={type}
+                                value={admitDraft[key]}
+                                onChange={(e) =>
+                                  setAdmitDraft((prev) => ({ ...prev, [key]: e.target.value }))
+                                }
+                                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-900 outline-none focus:border-blue-300"
+                              />
+                            </label>
+                          ))}
+                          <label className="text-xs font-medium text-slate-700">
+                            Acuity (CTAS 1-5)
+                            <select
+                              value={admitDraft.triageAcuity}
+                              onChange={(e) =>
+                                setAdmitDraft((prev) => ({
+                                  ...prev,
+                                  triageAcuity: e.target.value,
+                                }))
+                              }
+                              className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-900 outline-none focus:border-blue-300"
+                            >
+                              {["CTAS 1", "CTAS 2", "CTAS 3", "CTAS 4", "CTAS 5"].map((level) => (
+                                <option key={level} value={level}>
+                                  {level}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </motion.div>
+                        <div className="mt-3 flex justify-end gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setAdmitFormOpen(false)}
+                          >
+                            Cancel
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={() => {
+                              void (async () => {
+                                const res = await fetch("/api/patients", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({
+                                    name: admitDraft.name.trim(),
+                                    room: admitDraft.room.trim(),
+                                    age: Number(admitDraft.age) || 0,
+                                    sex: admitDraft.sex.trim() || "?",
+                                    chiefConcern:
+                                      admitDraft.chiefConcern.trim() || "Not specified",
+                                    triageAcuity: admitDraft.triageAcuity,
+                                  }),
+                                });
+                                if (!res.ok) return;
+                                setAdmitFormOpen(false);
+                                setAdmitDraft({
+                                  name: "",
+                                  room: "",
+                                  age: "",
+                                  sex: "",
+                                  chiefConcern: "",
+                                  triageAcuity: "CTAS 3",
+                                });
+                                await refreshPatients();
+                              })();
+                            }}
+                          >
+                            Submit Admission
+                          </Button>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                   <div className="rounded-xl border border-slate-200">
-                    <div className="grid grid-cols-[1.3fr_1fr_0.8fr_1fr_1.3fr_0.8fr_0.8fr] border-b border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-600">
+                    <motion.div layout className="grid grid-cols-[1.2fr_0.9fr_0.7fr_0.8fr_1.1fr_0.7fr_0.7fr_0.9fr] border-b border-slate-200 bg-slate-50 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-700">
                       <span>Patient</span>
                       <span>MRN</span>
                       <span>Age/Sex</span>
@@ -2621,29 +3798,27 @@ export default function VitalOsClient() {
                       <span>Chief Concern</span>
                       <span>Acuity</span>
                       <span>Status</span>
-                    </div>
+                      <span>Actions</span>
+                    </motion.div>
                   <div className="max-h-[420px] overflow-auto">
                     {filteredPatients.map((p) => (
-                      <button
+                      <div
                         key={p.id}
-                        type="button"
                         onClick={() => {
                           setActivePage("dashboard");
                           void openRequestedView(p, fullChartSections);
                         }}
                         className={cn(
-                          "grid w-full grid-cols-[1.3fr_1fr_0.8fr_1fr_1.3fr_0.8fr_0.8fr] gap-2 border-b border-slate-100 px-3 py-2.5 text-left text-sm hover:bg-slate-50",
+                          "grid cursor-pointer grid-cols-[1.2fr_0.9fr_0.7fr_0.8fr_1.1fr_0.7fr_0.7fr_0.9fr] gap-2 border-b border-slate-100 px-3 py-2.5 text-left text-sm hover:bg-slate-50",
                           selectedPatientId === p.id ? "bg-blue-50/60" : "bg-white"
                         )}
                       >
                         <span className="font-medium text-slate-900">
                           {p.name}
-                          {(p.riskFlags || p.allergies.length > 0) && (
-                            <span className="ml-1 text-xs text-rose-600">●</span>
-                          )}
+                          <PatientClinicalIndicator patient={p} />
                         </span>
-                        <span className="text-slate-600">{p.mrn}</span>
-                        <span className="text-slate-600">
+                        <span className="text-slate-900">{p.mrn}</span>
+                        <span className="text-slate-900">
                           {p.age}
                           {p.sex}
                         </span>
@@ -2652,7 +3827,7 @@ export default function VitalOsClient() {
                             {p.room}
                           </Badge>
                         </span>
-                        <span className="truncate text-slate-600">{p.chiefConcern}</span>
+                        <span className="truncate text-slate-900">{p.chiefConcern}</span>
                         <span>
                           <Badge
                             variant={
@@ -2671,10 +3846,65 @@ export default function VitalOsClient() {
                             {p.triageAcuity}
                           </Badge>
                         </span>
-                        <span className="text-xs text-slate-600">
+                        <span className="text-xs text-slate-900">
                           {p.allergies.length ? "Allergy" : "Stable"}
                         </span>
-                      </button>
+                        <div
+                          className="flex items-center justify-end"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {dischargeConfirmId === p.id ? (
+                            <div className="flex items-center gap-1 text-xs text-slate-700">
+                              <span>Confirm discharge?</span>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-7 px-2 text-[11px]"
+                                onClick={() => setDischargeConfirmId(null)}
+                              >
+                                No
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                className="h-7 px-2 text-[11px]"
+                                onClick={() => {
+                                  void (async () => {
+                                    const res = await fetch(
+                                      `/api/patients/${encodeURIComponent(p.id)}`,
+                                      { method: "DELETE" }
+                                    );
+                                    if (!res.ok) return;
+                                    setDischargeConfirmId(null);
+                                    if (selectedPatientId === p.id) {
+                                      setRequestedPatientView(null);
+                                      setActiveRequestedSections([]);
+                                      setSelectedPatientId(null);
+                                    }
+                                    setOpenPatientTabIds((prev) =>
+                                      prev.filter((tabId) => tabId !== p.id)
+                                    );
+                                    await refreshPatients();
+                                  })();
+                                }}
+                              >
+                                Yes
+                              </Button>
+                            </div>
+                          ) : (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 px-2 text-[11px]"
+                              onClick={() => setDischargeConfirmId(p.id)}
+                            >
+                              Discharge
+                            </Button>
+                          )}
+                        </div>
+                      </div>
                     ))}
                   </div>
                   </div>
@@ -2724,7 +3954,10 @@ export default function VitalOsClient() {
                         className="rounded-xl border border-[#dce8f8] bg-white p-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
                       >
                         <div className="mb-2 flex items-center justify-between gap-2">
-                          <p className="text-sm font-semibold text-slate-900">{patient.name}</p>
+                          <p className="text-sm font-semibold text-slate-900">
+                            {patient.name}
+                            <PatientClinicalIndicator patient={patient} />
+                          </p>
                           <Badge variant={statusBadgeVariant(status)}>{status}</Badge>
                         </div>
                         <div className="grid grid-cols-2 gap-2 text-xs text-slate-600">
@@ -3001,6 +4234,13 @@ export default function VitalOsClient() {
                       >
                         Reload Patient Store
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => logout()}
+                        className="rounded-lg border border-slate-300 px-3 py-1.5"
+                      >
+                        Sign Out
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -3009,27 +4249,30 @@ export default function VitalOsClient() {
           ) : (
             <>
           {openPatientTabIds.length > 1 && (
-            <div className="mb-3 rounded-xl border border-[#e3edf9] bg-[#f8fbff] px-3 py-2 shadow-sm">
-              <div className="flex flex-wrap items-center gap-2">
+            <motion.div layout className="panel mb-3 rounded-xl border border-[#e3edf9] bg-white px-3 py-2 shadow-sm">
+              <motion.div layout className="flex flex-wrap items-center gap-2">
                 {openPatientTabIds.map((id) => {
                   const p = patients.find((item) => item.id === id);
                   if (!p) return null;
+                  const active = id === selectedPatientId;
                   return (
-                    <button
+                    <motion.button
                       key={id}
+                      layout
                       type="button"
                       onClick={() => setSelectedPatientId(id)}
                       className={cn(
-                        "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs",
-                        id === selectedPatientId
-                          ? "border-blue-200 bg-white text-slate-900"
-                          : "border-slate-200 bg-slate-50 text-slate-600"
+                        "group inline-flex items-center gap-2 rounded-full border bg-[#07182f] px-3 py-1 text-xs text-slate-100 transition-colors",
+                        active
+                          ? "border-clinical-teal/70 ring-clinical"
+                          : "border-white/15 hover:border-slate-400/50"
                       )}
                     >
-                      {p.name}
-                      <span className="text-slate-400">{p.mrn}</span>
+                      <span className="font-medium">{p.name}</span>
+                      <PatientClinicalIndicator patient={p} />
+                      <span className="mono text-[10px] text-slate-300">{p.mrn}</span>
                       <span
-                        className="rounded-full p-0.5 hover:bg-slate-200"
+                        className="rounded-full p-0.5 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-white/10"
                         onClick={(e) => {
                           e.stopPropagation();
                           setOpenPatientTabIds((prev) => prev.filter((tab) => tab !== id));
@@ -3038,16 +4281,16 @@ export default function VitalOsClient() {
                       >
                         <X className="h-3 w-3" />
                       </span>
-                    </button>
+                    </motion.button>
                   );
                 })}
-              </div>
+              </motion.div>
               {openPatientTabIds.length > 3 && (
                 <p className="mt-2 text-xs text-amber-700">
                   Multiple charts open - verify active patient before documenting.
                 </p>
               )}
-            </div>
+            </motion.div>
           )}
 
           {activePatient && hasRequestedSections && (
@@ -3059,35 +4302,35 @@ export default function VitalOsClient() {
           {activePatient && (
             <div className="mb-3 grid grid-cols-2 gap-2 rounded-xl border border-[#e3edf9] bg-white p-3 shadow-sm lg:grid-cols-7">
               <div>
-                <p className="text-[11px] uppercase text-slate-500">Patient</p>
-                <p className="text-sm font-semibold">{activePatient.name}</p>
+                <p className="text-[11px] uppercase text-slate-600">Patient</p>
+                <p className="text-sm font-semibold text-slate-900">{activePatient.name}</p>
               </div>
               <div>
-                <p className="text-[11px] uppercase text-slate-500">MRN</p>
-                <p className="text-sm font-semibold">{activePatient.mrn}</p>
+                <p className="text-[11px] uppercase text-slate-600">MRN</p>
+                <p className="text-sm font-semibold text-slate-900">{activePatient.mrn}</p>
               </div>
               <div>
-                <p className="text-[11px] uppercase text-slate-500">Age/Sex</p>
-                <p className="text-sm font-semibold">
+                <p className="text-[11px] uppercase text-slate-600">Age/Sex</p>
+                <p className="text-sm font-semibold text-slate-900">
                   {activePatient.age}
                   {activePatient.sex}
                 </p>
               </div>
               <div>
-                <p className="text-[11px] uppercase text-slate-500">DOB</p>
-                <p className="text-sm font-semibold">{activePatient.dob}</p>
+                <p className="text-[11px] uppercase text-slate-600">DOB</p>
+                <p className="text-sm font-semibold text-slate-900">{activePatient.dob}</p>
               </div>
               <div>
-                <p className="text-[11px] uppercase text-slate-500">Blood</p>
-                <p className="text-sm font-semibold">{activePatient.bloodType || "—"}</p>
+                <p className="text-[11px] uppercase text-slate-600">Blood</p>
+                <p className="text-sm font-semibold text-slate-900">{activePatient.bloodType || "—"}</p>
               </div>
               <div>
-                <p className="text-[11px] uppercase text-slate-500">Provider</p>
-                <p className="text-sm font-semibold">{activePatient.pcp ?? "Unassigned"}</p>
+                <p className="text-[11px] uppercase text-slate-600">Provider</p>
+                <p className="text-sm font-semibold text-slate-900">{activePatient.pcp ?? "Unassigned"}</p>
               </div>
               <div>
-                <p className="text-[11px] uppercase text-slate-500">Last Visit</p>
-                <p className="text-sm font-semibold">{activePatient.lastVisit}</p>
+                <p className="text-[11px] uppercase text-slate-600">Last Visit</p>
+                <p className="text-sm font-semibold text-slate-900">{activePatient.lastVisit}</p>
               </div>
             </div>
           )}
@@ -3107,13 +4350,13 @@ export default function VitalOsClient() {
             {activePatient && showSection("allergies") && (
             <div className="rounded-xl border border-[#e3edf9] border-l-4 border-l-rose-300 bg-rose-50/30 p-3 shadow-sm">
               <div className="mb-2 flex items-center justify-between">
-                <p className="text-sm font-semibold">Allergies</p>
+                <p className="text-sm font-semibold text-slate-900">Allergies</p>
                 <Badge variant="allergies" className="text-xs">
                   {activeAllergies.length ? `${activeAllergies.length} total` : "None listed"}
                 </Badge>
               </div>
               <div className="rounded-xl border border-slate-100">
-                <div className="grid grid-cols-[1.5fr_1fr_1fr] border-b border-slate-100 bg-slate-50 px-2 py-1 text-[11px] font-medium text-slate-500">
+                <div className="grid grid-cols-[1.5fr_1fr_1fr] border-b border-slate-100 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700">
                   <span>Allergen</span>
                   <span>Reaction</span>
                   <span>Severity</span>
@@ -3131,8 +4374,8 @@ export default function VitalOsClient() {
                       className="grid grid-cols-[1.5fr_1fr_1fr] border-b border-slate-100 px-2 py-1.5 text-sm last:border-b-0"
                     >
                       <span className="font-medium text-slate-800">{namePart || a}</span>
-                      <span className="text-slate-600">{reactionPart || "Noted"}</span>
-                      <span className="text-slate-600">{severity}</span>
+                      <span className="text-slate-900">{reactionPart || "Noted"}</span>
+                      <span className="text-slate-900">{severity}</span>
                     </div>
                   );
                 })}
@@ -3143,13 +4386,13 @@ export default function VitalOsClient() {
             {activePatient && showSection("medications") && (
             <div className="rounded-xl border border-[#e3edf9] border-l-4 border-l-blue-300 bg-blue-50/20 p-3 shadow-sm">
               <div className="mb-2 flex items-center justify-between">
-                <p className="text-sm font-semibold">Medications</p>
+                <p className="text-sm font-semibold text-slate-900">Medications</p>
                 <Badge variant="medications" className="text-xs">
                   {activeMeds.length ? `${activeMeds.length} active` : "None listed"}
                 </Badge>
               </div>
               <div className="rounded-xl border border-slate-100">
-                <div className="grid grid-cols-[1.6fr_1.2fr_1fr] border-b border-slate-100 bg-slate-50 px-2 py-1 text-[11px] font-medium text-slate-500">
+                <div className="grid grid-cols-[1.6fr_1.2fr_1fr] border-b border-slate-100 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700">
                   <span>Medication</span>
                   <span>Dose / Frequency</span>
                   <span>Indication</span>
@@ -3160,8 +4403,8 @@ export default function VitalOsClient() {
                     className="grid grid-cols-[1.6fr_1.2fr_1fr] border-b border-slate-100 px-2 py-1.5 text-sm last:border-b-0"
                   >
                     <span className="font-medium text-slate-800">{m.name}</span>
-                    <span className="text-slate-600">{m.sig}</span>
-                    <span className="text-slate-600">Active</span>
+                    <span className="text-slate-900">{m.sig}</span>
+                    <span className="text-slate-900">Active</span>
                   </div>
                 ))}
               </div>
@@ -3171,13 +4414,13 @@ export default function VitalOsClient() {
             {activePatient && showSection("diagnoses") && (
             <div className="rounded-xl border border-[#e3edf9] border-l-4 border-l-amber-300 bg-amber-50/20 p-3 shadow-sm">
               <div className="mb-2 flex items-center justify-between">
-                <p className="text-sm font-semibold">Problems</p>
+                <p className="text-sm font-semibold text-slate-900">Problems</p>
                 <Badge variant="problems" className="text-xs">
                   {activeProblems.length ? `${activeProblemCount} active` : "None listed"}
                 </Badge>
               </div>
               <div className="rounded-xl border border-slate-100">
-                <div className="grid grid-cols-[2fr_1fr_1fr] border-b border-slate-100 bg-slate-50 px-2 py-1 text-[11px] font-medium text-slate-500">
+                <div className="grid grid-cols-[2fr_1fr_1fr] border-b border-slate-100 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700">
                   <span>Problem</span>
                   <span>Status</span>
                   <span>Since</span>
@@ -3192,24 +4435,49 @@ export default function VitalOsClient() {
                       transition={{ duration: 0.2 }}
                       className="grid grid-cols-[2fr_1fr_1fr] border-b border-slate-100 px-2 py-1.5 text-sm last:border-b-0"
                     >
-                      <span className="font-medium text-slate-800">{name}</span>
-                      <Badge
-                        variant={
-                          status === "Resolved"
-                            ? "notes"
-                            : status === "Monitoring"
-                              ? "problems"
-                              : status === "Pending"
-                                ? "allergies"
-                                : status === "Ruled out"
-                                  ? "outline"
-                                  : "medications"
-                        }
-                        className="w-fit text-[10px] transition-all duration-300"
-                      >
-                        {status}
-                      </Badge>
-                      <span className="text-slate-600">{since}</span>
+                      <span className="font-medium text-slate-900">{name}</span>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <select
+                          value={status}
+                          onChange={(e) => {
+                            if (!activePatient) return;
+                            const nextStatus = e.target.value as ProblemStatus;
+                            setProblemStateByPatient((prev) => ({
+                              ...prev,
+                              [activePatient.id]: (prev[activePatient.id] ?? []).map((item) =>
+                                item.id === id ? { ...item, status: nextStatus } : item
+                              ),
+                            }));
+                            setProblemStatusFlashId(`${id}-${nextStatus}`);
+                          }}
+                          className="h-7 rounded-md border border-slate-200 bg-white px-1 text-[10px] text-slate-900"
+                        >
+                          {PROBLEM_STATUS_OPTIONS.map((option) => (
+                            <option key={option} value={option}>
+                              {option}
+                            </option>
+                          ))}
+                        </select>
+                        <Badge
+                          variant={problemStatusBadgeVariant(status)}
+                          className="w-fit text-[10px] transition-all duration-300"
+                        >
+                          {status}
+                        </Badge>
+                        <AnimatePresence>
+                          {problemStatusFlashId === `${id}-${status}` && (
+                            <motion.span
+                              key={`${id}-${status}-check`}
+                              initial={{ scale: 0, opacity: 0 }}
+                              animate={{ scale: 1, opacity: 1 }}
+                              exit={{ scale: 0, opacity: 0 }}
+                            >
+                              <Check className="h-3.5 w-3.5 text-clinical-teal" />
+                            </motion.span>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                      <span className="text-slate-900">{since}</span>
                     </motion.div>
                   ))}
                 </AnimatePresence>
@@ -3220,7 +4488,7 @@ export default function VitalOsClient() {
             {activePatient && (showSection("vitals") || showSection("labs")) && (
             <div className="rounded-xl border border-[#e3edf9] border-l-4 border-l-teal-300 bg-teal-50/20 p-3 shadow-sm">
               <div className="mb-2 flex items-center justify-between">
-                <p className="text-sm font-semibold">Recent Notes / Vitals</p>
+                <p className="text-sm font-semibold text-slate-900">Recent Notes / Vitals</p>
                 <Badge variant="notes" className="text-xs">
                   {activeVitals.length ? "Live" : "None listed"}
                 </Badge>
@@ -3228,8 +4496,8 @@ export default function VitalOsClient() {
               <div className="grid grid-cols-2 gap-1 text-sm">
                 {activeVitals.slice(0, 6).map(([k, v]) => (
                   <div key={k} className="rounded-lg bg-slate-50 px-2 py-1.5">
-                    <span className="mr-1 text-slate-500">{k}</span>
-                    <span className="font-medium">{v}</span>
+                    <span className="mr-1 text-slate-600">{k}</span>
+                    <span className="font-medium text-slate-900">{v}</span>
                   </div>
                 ))}
                 <div className="col-span-2 rounded-lg bg-slate-50 px-2 py-1.5 text-xs text-slate-700">
@@ -3299,8 +4567,16 @@ export default function VitalOsClient() {
             </div>
           )}
 
-          {pendingOrders.length > 0 && (
-            <div className="mt-3 rounded-xl border border-cyan-200/60 bg-gradient-to-br from-[#0b2a55] via-[#10386c] to-[#0f4b78] p-3 text-white shadow-md">
+          <AnimatePresence initial={false}>
+            {pendingOrders.length > 0 && ordersPanelVisible && (
+              <motion.div
+                key="live-medication-orders"
+                initial={{ opacity: 1, y: 0 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 8 }}
+                transition={{ duration: 0.4 }}
+                className="mt-3 rounded-xl border border-cyan-200/60 bg-gradient-to-br from-[#0b2a55] via-[#10386c] to-[#0f4b78] p-3 text-white shadow-md"
+              >
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-sm font-semibold">Live Medication Orders</p>
                 <Badge variant="notes" className="bg-cyan-100 text-[#0b2a55]">
@@ -3367,8 +4643,9 @@ export default function VitalOsClient() {
                   </motion.div>
                 ))}
               </div>
-            </div>
-          )}
+              </motion.div>
+            )}
+          </AnimatePresence>
 
             </>
           )}
@@ -4334,9 +5611,10 @@ function DemoRosterPanel({
                 : "border-border/60 bg-background/40 hover:border-border"
             )}
           >
-            <div className="mono text-[11px] font-medium text-foreground/95">
+            <motion.div layout className="mono text-[11px] font-medium text-foreground/95">
               {p.name}
-            </div>
+              <PatientClinicalIndicator patient={p} />
+            </motion.div>
             <div className="mono text-[10px] text-muted-foreground">
               {p.mrn} · {p.age}
               {p.sex} ·{" "}
@@ -4571,7 +5849,7 @@ function SystemPanel({ systemState }: { systemState: SystemState }) {
       value: "Browser SpeechSynthesis",
       tone: "text-clinical-mint",
     },
-    { label: "BRAIN", value: "Groq · Llama", tone: "text-clinical-cyan" },
+    { label: "BRAIN", value: "Gemini · 1.5 Flash", tone: "text-clinical-cyan" },
     {
       label: "MODE",
       value: systemState.toUpperCase(),

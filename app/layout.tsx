@@ -1,5 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
+import { AuthProvider } from "@/components/auth-provider";
+import { AppGate } from "@/components/app-gate";
 import "./globals.css";
 
 const inter = Inter({
@@ -43,7 +45,9 @@ export default function RootLayout({
   return (
     <html lang="en" className={`dark ${inter.variable}`} suppressHydrationWarning>
       <body className="min-h-screen font-sans antialiased" suppressHydrationWarning>
-        {children}
+        <AuthProvider>
+          <AppGate>{children}</AppGate>
+        </AuthProvider>
       </body>
     </html>
   );

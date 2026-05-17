@@ -1,5 +1,5 @@
 /**
- * VITAL OS — LLM brain (Groq).
+ * VITAL OS — LLM brain (Google Gemini).
  */
 
 import {
@@ -76,134 +76,118 @@ export interface VitalResponse {
   storeEvents?: PatientStoreEvent[];
 }
 
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const PRIMARY_MODEL = "llama-3.3-70b-versatile";
-const FALLBACK_MODEL = "llama-3.1-8b-instant";
+const GEMINI_MODEL = "gemini-1.5-flash";
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 const MAX_HISTORY_MESSAGES = 24;
 const MAX_TOOL_ROUNDS = 8;
 
-const PATIENT_TOOLS = [
+const GEMINI_FUNCTION_DECLARATIONS = [
   {
-    type: "function" as const,
-    function: {
-      name: "list_patients",
-      description:
-        "List all patients in the local roster (id, MRN, name, demographics, chief concern).",
-      parameters: { type: "object", properties: {}, required: [] },
-    },
+    name: "list_patients",
+    description:
+      "List all patients in the local roster (id, MRN, name, demographics, chief concern).",
+    parameters: { type: "object", properties: {}, required: [] },
   },
   {
-    type: "function" as const,
-    function: {
-      name: "get_patient",
-      description:
-        "Load one patient's full chart text by internal patient_id or MRN.",
-      parameters: {
-        type: "object",
-        properties: {
-          patient_id: {
-            type: "string",
-            description: "Internal id from roster, e.g. pt-jane-doe-abc123",
-          },
-          mrn: { type: "string", description: "Medical record number if known" },
+    name: "get_patient",
+    description:
+      "Load one patient's full chart text by internal patient_id or MRN.",
+    parameters: {
+      type: "object",
+      properties: {
+        patient_id: {
+          type: "string",
+          description: "Internal id from roster, e.g. pt-jane-doe-abc123",
         },
+        mrn: { type: "string", description: "Medical record number if known" },
       },
     },
   },
   {
-    type: "function" as const,
-    function: {
-      name: "create_patient",
-      description:
-        "Create a new chart row. Requires at least a name; other fields optional.",
-      parameters: {
-        type: "object",
-        properties: {
-          name: { type: "string" },
-          mrn: { type: "string" },
-          age: { type: "number" },
-          sex: { type: "string" },
-          chief_concern: { type: "string" },
-          allergies: { type: "array", items: { type: "string" } },
-          diagnoses: { type: "array", items: { type: "string" } },
-          medications: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                name: { type: "string" },
-                sig: { type: "string" },
-              },
-              required: ["name"],
-            },
-          },
-          vitals: {
+    name: "create_patient",
+    description:
+      "Create a new chart row. Requires at least a name; other fields optional.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        mrn: { type: "string" },
+        age: { type: "number" },
+        sex: { type: "string" },
+        chief_concern: { type: "string" },
+        allergies: { type: "array", items: { type: "string" } },
+        diagnoses: { type: "array", items: { type: "string" } },
+        medications: {
+          type: "array",
+          items: {
             type: "object",
-            additionalProperties: { type: "string" },
-          },
-          chart_note: { type: "string" },
-          social: { type: "string" },
-          recent_labs: { type: "string" },
-          last_visit: { type: "string" },
-        },
-        required: ["name"],
-      },
-    },
-  },
-  {
-    type: "function" as const,
-    function: {
-      name: "update_patient",
-      description:
-        "Patch fields on an existing patient. patient_id is required; only include fields to change.",
-      parameters: {
-        type: "object",
-        properties: {
-          patient_id: { type: "string" },
-          name: { type: "string" },
-          mrn: { type: "string" },
-          age: { type: "number" },
-          sex: { type: "string" },
-          chief_concern: { type: "string" },
-          allergies: { type: "array", items: { type: "string" } },
-          diagnoses: { type: "array", items: { type: "string" } },
-          medications: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                name: { type: "string" },
-                sig: { type: "string" },
-              },
-              required: ["name"],
+            properties: {
+              name: { type: "string" },
+              sig: { type: "string" },
             },
+            required: ["name"],
           },
-          vitals: {
-            type: "object",
-            additionalProperties: { type: "string" },
-          },
-          chart_note: { type: "string" },
-          social: { type: "string" },
-          recent_labs: { type: "string" },
-          last_visit: { type: "string" },
         },
-        required: ["patient_id"],
+        vitals: {
+          type: "object",
+          additionalProperties: { type: "string" },
+        },
+        chart_note: { type: "string" },
+        social: { type: "string" },
+        recent_labs: { type: "string" },
+        last_visit: { type: "string" },
       },
+      required: ["name"],
     },
   },
   {
-    type: "function" as const,
-    function: {
-      name: "delete_patient",
-      description:
-        "Remove a patient row from the local roster. Requires patient_id.",
-      parameters: {
-        type: "object",
-        properties: {
-          patient_id: { type: "string" },
+    name: "update_patient",
+    description:
+      "Patch fields on an existing patient. patient_id is required; only include fields to change.",
+    parameters: {
+      type: "object",
+      properties: {
+        patient_id: { type: "string" },
+        name: { type: "string" },
+        mrn: { type: "string" },
+        age: { type: "number" },
+        sex: { type: "string" },
+        chief_concern: { type: "string" },
+        allergies: { type: "array", items: { type: "string" } },
+        diagnoses: { type: "array", items: { type: "string" } },
+        medications: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              sig: { type: "string" },
+            },
+            required: ["name"],
+          },
         },
-        required: ["patient_id"],
+        vitals: {
+          type: "object",
+          additionalProperties: { type: "string" },
+        },
+        chart_note: { type: "string" },
+        social: { type: "string" },
+        recent_labs: { type: "string" },
+        last_visit: { type: "string" },
       },
+      required: ["patient_id"],
+    },
+  },
+  {
+    name: "delete_patient",
+    description:
+      "Remove a patient row from the local roster. Requires patient_id.",
+    parameters: {
+      type: "object",
+      properties: {
+        patient_id: { type: "string" },
+      },
+      required: ["patient_id"],
     },
   },
 ];
@@ -248,106 +232,110 @@ function buildModeInstruction(mode: VitalMode, patientContext?: string): string 
   }
 }
 
-type ToolCall = {
-  id: string;
-  type?: string;
-  function: { name: string; arguments: string };
+type GeminiPart =
+  | { text: string }
+  | { functionCall: { name: string; args?: Record<string, unknown> } }
+  | { functionResponse: { name: string; response: Record<string, unknown> } };
+
+type GeminiContent = {
+  role: "user" | "model";
+  parts: GeminiPart[];
 };
-
-type ChatMessage =
-  | { role: "system"; content: string }
-  | { role: "user"; content: string }
-  | {
-      role: "assistant";
-      content: string | null;
-      tool_calls?: ToolCall[];
-    }
-  | { role: "tool"; tool_call_id: string; content: string };
-
-interface ChatCompletionResponse {
-  choices?: Array<{
-    message?: {
-      role?: string;
-      content?: string | null;
-      tool_calls?: ToolCall[];
-    };
-    finish_reason?: string;
-  }>;
-  error?: { message?: string; type?: string; code?: string };
-}
 
 type AssistantPayload = {
-  content?: string | null;
-  tool_calls?: ToolCall[];
+  parts: GeminiPart[];
 };
 
-async function callGroqCompletion(
-  model: string,
+interface GeminiGenerateResponse {
+  candidates?: Array<{
+    content?: { role?: string; parts?: GeminiPart[] };
+    finishReason?: string;
+  }>;
+  error?: { message?: string; code?: number; status?: string };
+}
+
+function toolArgsToString(args?: Record<string, unknown>): string {
+  if (!args || Object.keys(args).length === 0) return "{}";
+  return JSON.stringify(args);
+}
+
+function toolResultToResponse(content: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    /* fall through */
+  }
+  return { result: content };
+}
+
+async function callGeminiCompletion(
   apiKey: string,
-  messages: ChatMessage[],
+  systemPrompt: string,
+  contents: GeminiContent[],
   opts?: {
     signal?: AbortSignal;
     temperature?: number;
     max_tokens?: number;
-    tools?: typeof PATIENT_TOOLS;
+    tools?: boolean;
   }
 ): Promise<AssistantPayload> {
   const body: Record<string, unknown> = {
-    model,
-    messages,
-    temperature: opts?.temperature ?? 0.55,
-    max_tokens: opts?.max_tokens ?? 1024,
+    systemInstruction: {
+      parts: [{ text: systemPrompt }],
+    },
+    contents,
+    generationConfig: {
+      temperature: opts?.temperature ?? 0.55,
+      maxOutputTokens: opts?.max_tokens ?? 1024,
+    },
   };
-  if (opts?.tools?.length) {
-    body.tools = opts.tools;
-    body.tool_choice = "auto";
+  if (opts?.tools !== false) {
+    body.tools = [{ functionDeclarations: GEMINI_FUNCTION_DECLARATIONS }];
   }
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  headers.Authorization = `Bearer ${apiKey}`;
-  const res = await fetch(GROQ_URL, {
+  const res = await fetch(`${GEMINI_URL}?key=${encodeURIComponent(apiKey)}`, {
     method: "POST",
-    headers,
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     signal: opts?.signal,
     cache: "no-store",
   });
 
-  const json = (await res.json().catch(() => ({}))) as ChatCompletionResponse;
+  const json = (await res.json().catch(() => ({}))) as GeminiGenerateResponse;
   const errMsg =
     json.error?.message ||
-    (!res.ok ? `Groq request failed with HTTP ${res.status}.` : null);
+    (!res.ok ? `Gemini request failed with HTTP ${res.status}.` : null);
 
   if (!res.ok) {
     const err = new Error(
       res.status === 429
-        ? "Groq rate limit reached. Wait a minute or check your plan at console.groq.com."
-        : errMsg || `Groq error (${res.status}).`
+        ? "Gemini rate limit reached. Wait a minute or check your quota in Google AI Studio."
+        : errMsg || `Gemini error (${res.status}).`
     ) as Error & {
       status?: number;
       model?: string;
     };
     err.status = res.status;
-    err.model = model;
+    err.model = GEMINI_MODEL;
     throw err;
   }
 
-  const assistant = json.choices?.[0]?.message;
-  if (!assistant) {
-    throw new Error("The model returned no message. Try again.");
-  }
-
-  const text = assistant.content?.trim() ?? "";
-  const hasTools = Boolean(assistant.tool_calls?.length);
+  const parts = json.candidates?.[0]?.content?.parts ?? [];
+  const hasTools = parts.some((part) => "functionCall" in part);
+  const text = parts
+    .map((part) => ("text" in part ? part.text : ""))
+    .join("")
+    .trim();
   if (!text && !hasTools) {
     throw new Error(
       "The model returned an empty response. Try rephrasing the command."
     );
   }
 
-  return assistant as AssistantPayload;
+  return { parts };
 }
 
 function rosterChangedFromEvents(events: PatientStoreEvent[]): boolean {
@@ -359,68 +347,113 @@ function rosterChangedFromEvents(events: PatientStoreEvent[]): boolean {
   );
 }
 
-async function runCompletionWithTools(
-  model: string,
+function textFromAssistantParts(parts: GeminiPart[]): string {
+  return parts
+    .map((part) => ("text" in part ? part.text : ""))
+    .join("")
+    .trim();
+}
+
+async function requestPlainTextSummary(
   apiKey: string,
-  seedMessages: ChatMessage[],
+  systemPrompt: string,
+  contents: GeminiContent[],
+  opts: {
+    signal?: AbortSignal;
+    temperature: number;
+    max_tokens: number;
+  }
+): Promise<string> {
+  const summary = await callGeminiCompletion(apiKey, systemPrompt, contents, {
+    signal: opts.signal,
+    temperature: opts.temperature,
+    max_tokens: opts.max_tokens,
+    tools: false,
+  });
+  const text = textFromAssistantParts(summary.parts);
+  if (!text) {
+    throw new Error(
+      "The model returned an empty response. Try rephrasing the command."
+    );
+  }
+  return text;
+}
+
+async function runCompletionWithTools(
+  apiKey: string,
+  systemPrompt: string,
+  seedContents: GeminiContent[],
   opts: {
     signal?: AbortSignal;
     temperature: number;
     max_tokens: number;
   }
 ): Promise<{ text: string; storeEvents: PatientStoreEvent[] }> {
-  const messages: ChatMessage[] = [...seedMessages];
+  const contents: GeminiContent[] = [...seedContents];
   const storeEvents: PatientStoreEvent[] = [];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-    const assistant = await callGroqCompletion(model, apiKey, messages, {
+    const assistant = await callGeminiCompletion(apiKey, systemPrompt, contents, {
       signal: opts.signal,
       temperature: opts.temperature,
       max_tokens: opts.max_tokens,
-      tools: PATIENT_TOOLS,
     });
 
-    if (assistant.tool_calls?.length) {
-      messages.push({
-        role: "assistant",
-        content: assistant.content ?? null,
-        tool_calls: assistant.tool_calls,
-      });
-      for (const tc of assistant.tool_calls) {
+    const functionCalls = assistant.parts.filter(
+      (part): part is { functionCall: { name: string; args?: Record<string, unknown> } } =>
+        "functionCall" in part
+    );
+
+    if (functionCalls.length) {
+      contents.push({ role: "model", parts: assistant.parts });
+      const responseParts: GeminiPart[] = [];
+      for (const part of functionCalls) {
+        const call = part.functionCall;
         const { content, events } = await executePatientToolCall(
-          tc.function.name,
-          tc.function.arguments ?? "{}"
+          call.name,
+          toolArgsToString(call.args)
         );
         for (const e of events) storeEvents.push(e);
-        messages.push({
-          role: "tool",
-          tool_call_id: tc.id,
-          content,
+        responseParts.push({
+          functionResponse: {
+            name: call.name,
+            response: toolResultToResponse(content),
+          },
         });
       }
+      contents.push({ role: "user", parts: responseParts });
       continue;
     }
 
-    const text = assistant.content?.trim() ?? "";
+    const text = textFromAssistantParts(assistant.parts);
     if (!text) {
-      throw new Error(
-        "The model returned an empty response. Try rephrasing the command."
-      );
+      return {
+        text: await requestPlainTextSummary(
+          apiKey,
+          systemPrompt,
+          contents,
+          opts
+        ),
+        storeEvents,
+      };
     }
     return { text, storeEvents };
   }
 
-  throw new Error("Too many tool rounds — simplify the request.");
+  return {
+    text: await requestPlainTextSummary(apiKey, systemPrompt, contents, opts),
+    storeEvents,
+  };
 }
 
 export async function runVital(
   input: VitalRequestInput,
   opts?: { signal?: AbortSignal }
 ): Promise<VitalResponse> {
-  const apiKey = process.env.GROQ_API_KEY?.trim();
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) {
     const err = new Error(
-      "GROQ_API_KEY is not set. Add it to .env.local and restart the dev server."
+      "GEMINI_API_KEY is not set. Add it to .env.local and restart the dev server."
     ) as Error & { code?: string };
     err.code = "MISSING_API_KEY";
     throw err;
@@ -456,52 +489,32 @@ export async function runVital(
     )
     .slice(-MAX_HISTORY_MESSAGES);
 
-  const seedMessages: ChatMessage[] = [
-    { role: "system", content: systemPrompt },
-    ...history.map((t) => ({
-      role: t.role as "user" | "assistant",
-      content: t.content.trim(),
-    })),
-    { role: "user", content: userMessage },
+  const historyContents: GeminiContent[] = history.map((t) => ({
+    role: t.role === "assistant" ? "model" : "user",
+    parts: [{ text: t.content.trim() }],
+  }));
+
+  const seedContents: GeminiContent[] = [
+    ...historyContents,
+    { role: "user", parts: [{ text: userMessage }] },
   ];
 
   const t0 = Date.now();
 
-  try {
-    const { text, storeEvents } = await runCompletionWithTools(
-      PRIMARY_MODEL,
-      apiKey,
-      seedMessages,
-      { signal: opts?.signal, temperature, max_tokens }
-    );
-    return {
-      text: sanitize(text),
-      mode,
-      model: PRIMARY_MODEL,
-      latencyMs: Date.now() - t0,
-      rosterChanged: rosterChangedFromEvents(storeEvents),
-      storeEvents: storeEvents.length ? storeEvents : undefined,
-    };
-  } catch (primaryErr) {
-    const status = (primaryErr as { status?: number }).status;
-    const shouldFallback = status === 400 || status === 403 || status === 404;
-    if (!shouldFallback) throw primaryErr;
-
-    const { text, storeEvents } = await runCompletionWithTools(
-      FALLBACK_MODEL,
-      apiKey,
-      seedMessages,
-      { signal: opts?.signal, temperature, max_tokens }
-    );
-    return {
-      text: sanitize(text),
-      mode,
-      model: FALLBACK_MODEL,
-      latencyMs: Date.now() - t0,
-      rosterChanged: rosterChangedFromEvents(storeEvents),
-      storeEvents: storeEvents.length ? storeEvents : undefined,
-    };
-  }
+  const { text, storeEvents } = await runCompletionWithTools(
+    apiKey,
+    systemPrompt,
+    seedContents,
+    { signal: opts?.signal, temperature, max_tokens }
+  );
+  return {
+    text: sanitize(text),
+    mode,
+    model: GEMINI_MODEL,
+    latencyMs: Date.now() - t0,
+    rosterChanged: rosterChangedFromEvents(storeEvents),
+    storeEvents: storeEvents.length ? storeEvents : undefined,
+  };
 }
 
 function sanitize(text: string): string {
