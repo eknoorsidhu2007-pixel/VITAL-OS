@@ -335,6 +335,44 @@ function normalizeProblemKey(problem: string): string {
   return problem.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+function problemsToEditable(
+  patientId: string,
+  problems: DemoPatient["problems"],
+  diagnoses: string[]
+): EditableProblem[] {
+  if (problems?.length) {
+    return problems.map((problem) => ({
+      id: `${patientId}-${normalizeProblemKey(problem.name)}`,
+      name: problem.name,
+      status: problem.status as ProblemStatus,
+      since: problem.since || "Chart",
+    }));
+  }
+  return diagnoses.map((name) => ({
+    id: `${patientId}-${normalizeProblemKey(name)}`,
+    name,
+    status: "Active" as const,
+    since: "Chart",
+  }));
+}
+
+async function persistPatientProblems(
+  patientId: string,
+  problems: EditableProblem[]
+): Promise<boolean> {
+  const payload = problems.map(({ name, status, since }) => ({
+    name,
+    status,
+    since,
+  }));
+  const res = await fetch(`/api/patients/${encodeURIComponent(patientId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ problems: payload }),
+  });
+  return res.ok;
+}
+
 function detectOrderMedication(command: string): string | null {
   const q = command.trim();
   const patterns = [
@@ -1988,13 +2026,11 @@ export default function VitalOsClient() {
     setProblemStateByPatient((prev) => {
       const next = { ...prev };
       for (const patient of patients) {
-        if (next[patient.id]?.length) continue;
-        next[patient.id] = patient.diagnoses.map((name) => ({
-          id: `${patient.id}-${normalizeProblemKey(name)}`,
-          name,
-          status: "Active",
-          since: "Chart",
-        }));
+        next[patient.id] = problemsToEditable(
+          patient.id,
+          patient.problems,
+          patient.diagnoses
+        );
       }
       return next;
     });
@@ -3003,12 +3039,16 @@ export default function VitalOsClient() {
           return true;
         }
         const problemIds = new Set(problems.map((problem) => problem.id));
+        const updatedProblems = (problemStateByPatient[target.id] ?? []).map(
+          (item) => (problemIds.has(item.id) ? { ...item, status } : item)
+        );
         setProblemStateByPatient((prev) => ({
           ...prev,
-          [target.id]: (prev[target.id] ?? []).map((item) =>
-            problemIds.has(item.id) ? { ...item, status } : item
-          ),
+          [target.id]: updatedProblems,
         }));
+        void persistPatientProblems(target.id, updatedProblems).then((ok) => {
+          if (ok) void refreshPatients();
+        });
         if (selectedPatientId !== target.id) {
           setSelectedPatientId(target.id);
         }
@@ -4823,13 +4863,22 @@ export default function VitalOsClient() {
                           onChange={(e) => {
                             if (!activePatient) return;
                             const nextStatus = e.target.value as ProblemStatus;
+                            const updatedProblems = (
+                              problemStateByPatient[activePatient.id] ?? []
+                            ).map((item) =>
+                              item.id === id ? { ...item, status: nextStatus } : item
+                            );
                             setProblemStateByPatient((prev) => ({
                               ...prev,
-                              [activePatient.id]: (prev[activePatient.id] ?? []).map((item) =>
-                                item.id === id ? { ...item, status: nextStatus } : item
-                              ),
+                              [activePatient.id]: updatedProblems,
                             }));
                             setProblemStatusFlashId(`${id}-${nextStatus}`);
+                            void persistPatientProblems(
+                              activePatient.id,
+                              updatedProblems
+                            ).then((ok) => {
+                              if (ok) void refreshPatients();
+                            });
                           }}
                           className="h-7 rounded-md border border-slate-200 bg-white px-1 text-[10px] text-slate-900"
                         >

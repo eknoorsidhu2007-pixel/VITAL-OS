@@ -5,6 +5,12 @@ export type DemoMedication = {
   sig: string;
 };
 
+export type PatientProblem = {
+  name: string;
+  status: string;
+  since?: string;
+};
+
 export type DemoPatient = {
   id: string;
   mrn: string;
@@ -20,6 +26,7 @@ export type DemoPatient = {
   chiefConcern: string;
   symptoms: string[];
   diagnoses: string[];
+  problems?: PatientProblem[];
   medications: DemoMedication[];
   vitals: Record<string, string>;
   recentLabs?: string;
@@ -850,9 +857,14 @@ export function patientToSnapshot(p: DemoPatient): string {
     `Blood type: ${p.bloodType}`,
     `Triage acuity: ${p.triageAcuity}`,
     `Chief concern: ${p.chiefConcern}`,
-    `Symptoms: ${p.symptoms?.length ? p.symptoms.join(", ") : "None listed"}`,
+    `Problems: ${
+      p.problems?.length
+        ? p.problems.map((x) => `${x.name} (${x.status})`).join(", ")
+        : p.diagnoses.length
+          ? p.diagnoses.join(", ")
+          : "None listed"
+    }`,
     `Allergies: ${p.allergies.length ? p.allergies.join(", ") : "None listed"}`,
-    `Diagnoses: ${p.diagnoses.length ? p.diagnoses.join(", ") : "None listed"}`,
     `Medications: ${
       p.medications.length
         ? p.medications.map((m) => `${m.name} — ${m.sig}`).join("; ")
