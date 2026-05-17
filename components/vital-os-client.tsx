@@ -45,6 +45,8 @@ import { VitalLogo } from "@/components/vital-logo";
 import { useAuth } from "@/components/auth-provider";
 import { ACCESS_RESTRICTED_MESSAGE } from "@/lib/auth";
 import type { ConversationTurn } from "@/lib/vital-llm";
+import type { ClinicalReasoningResult } from "@/lib/clinical-reasoning";
+import type { ClinicalCommandResponse } from "@/app/api/clinical-command/route";
 import type { DemoMedication, DemoPatient } from "@/lib/demo-patients";
 import { patientToSnapshot } from "@/lib/demo-patients";
 
@@ -570,6 +572,59 @@ type RequestedPatientView = {
   patient: DemoPatient;
   lines: string[];
 };
+
+type PendingMedicationDraft = {
+  patientId: string;
+  patientName: string;
+  medication: string;
+  dose: string | null;
+  route: string | null;
+  frequency: string | null;
+};
+
+const VALID_CHART_SECTIONS = new Set<PatientFieldKey>([
+  "overview",
+  "demographics",
+  "chief_concern",
+  "emergency_contact",
+  "care_team",
+  "risk_flags",
+  "notes",
+  "medications",
+  "allergies",
+  "vitals",
+  "labs",
+  "diagnoses",
+  "imaging",
+  "social",
+  "history",
+  "plan",
+]);
+
+function isAffirmativeCommand(text: string): boolean {
+  return /^(yes|yeah|yep|yup|confirm|confirmed|place it|go ahead|do it|proceed|ok|okay|sure)\b/i.test(
+    text.trim()
+  );
+}
+
+function isNegativeCommand(text: string): boolean {
+  return /^(no|nope|cancel|stop|never mind|nevermind|don't|dont)\b/i.test(
+    text.trim()
+  );
+}
+
+function apiSectionsToFields(sections: string[]): PatientFieldKey[] {
+  const out: PatientFieldKey[] = [];
+  for (const s of sections) {
+    const key = s.trim().toLowerCase() as PatientFieldKey;
+    if (VALID_CHART_SECTIONS.has(key) && !out.includes(key)) {
+      out.push(key);
+    }
+  }
+  return out.length
+    ? out
+    : (["overview", "medications", "allergies", "diagnoses"] as PatientFieldKey[]);
+}
 
 type ProblemStatus = "Active" | "Resolved" | "Monitoring" | "Pending" | "Ruled out";
 
@@ -1776,6 +1831,10 @@ export default function VitalOsClient() {
   const [orderNotice, setOrderNotice] = React.useState<string | null>(null);
   const [openPatientTabIds, setOpenPatientTabIds] = React.useState<string[]>([]);
   const [dischargeConfirmId, setDischargeConfirmId] = React.useState<string | null>(null);
+  const [pendingMedicationOrder, setPendingMedicationOrder] =
+    React.useState<PendingMedicationDraft | null>(null);
+  const [clinicalReasoning, setClinicalReasoning] =
+    React.useState<ClinicalReasoningResult | null>(null);
   const [admitFormOpen, setAdmitFormOpen] = React.useState(false);
   const [admitDraft, setAdmitDraft] = React.useState({
     name: "",
@@ -2565,6 +2624,235 @@ export default function VitalOsClient() {
     []
   );
 
+  const queueMedicationFromDraft = React.useCallback(
+    (draft: PendingMedicationDraft) => {
+      const target = patients.find((p) => p.id === draft.patientId);
+      if (!target) return;
+      const sigParts = [
+        draft.dose,
+        draft.route,
+        draft.frequency,
+      ].filter(Boolean);
+      const medicationLabel = sigParts.length
+        ? `${draft.medication} (${sigParts.join(", ")})`
+        : draft.medication;
+      const nurseName = pickBySeed(MOCK_NURSES, `${target.id}-${draft.medication}`);
+      const pharmacyStation = pickBySeed(
+        MOCK_PHARMACY,
+        `${draft.medication}-${target.room}`
+      );
+      setPendingOrders((prev) =>
+        [
+          {
+            id: uid(),
+            patientId: target.id,
+            patientName: target.name,
+            room: target.room,
+            medication: medicationLabel,
+            status: "Order Queued" as const,
+            nurseName,
+            pharmacyStation,
+            stepIndex: 0,
+            createdAt: Date.now(),
+          },
+          ...prev,
+        ].slice(0, 12)
+      );
+      setOrdersPanelVisible(true);
+      if (selectedPatientId !== target.id) {
+        setSelectedPatientId(target.id);
+      }
+      if (!activeRequestedSections.includes("medications")) {
+        setActiveRequestedSections((prev) => [...prev, "medications"]);
+      }
+    },
+    [patients, selectedPatientId, activeRequestedSections]
+  );
+
+  const applyClinicalApiResult = React.useCallback(
+    async (
+      command: string,
+      data: ClinicalCommandResponse
+    ): Promise<boolean> => {
+      const { action, assistantResponse, parsedIntent } = data;
+
+      if (action?.type === "unknown" || parsedIntent.intent === "unknown") {
+        return false;
+      }
+
+      const pushGeminiResponse = (text: string, model = "Gemini clinical command") => {
+        const local: VitalApiResponse = {
+          text,
+          mode: "general",
+          model,
+          latencyMs: 0,
+        };
+        setResponse(local);
+        setConversationTurns((prev) =>
+          [
+            ...prev,
+            { role: "user" as const, content: command },
+            { role: "assistant" as const, content: text },
+          ].slice(-40)
+        );
+        setAudit((prev) =>
+          [
+            {
+              id: uid(),
+              at: Date.now(),
+              mode: "general" as const,
+              command,
+              response: text,
+              model,
+              latencyMs: 0,
+              kind: "exchange" as const,
+            },
+            ...prev,
+          ].slice(0, 180)
+        );
+        if (voiceEnabled && supportsTts) {
+          speakRef.current(text);
+        } else {
+          setSystemState("idle");
+          resumeVoiceCaptureRef.current();
+        }
+      };
+
+      if (!action) {
+        if (assistantResponse) {
+          pushGeminiResponse(assistantResponse);
+          return true;
+        }
+        return false;
+      }
+
+      switch (action.type) {
+        case "clarification":
+          pushGeminiResponse(action.payload.question || assistantResponse);
+          return true;
+
+        case "roster_answer":
+          pushGeminiResponse(action.payload.text || assistantResponse);
+          return true;
+
+        case "open_patient_chart": {
+          const patient = patients.find((p) => p.id === action.payload.patientId);
+          if (!patient) {
+            pushGeminiResponse("Patient not found on the roster.");
+            return true;
+          }
+          const sections = apiSectionsToFields(action.payload.sections);
+          await openRequestedView(patient, sections);
+          const editable = problemStateByPatient[patient.id] ?? [];
+          const spoken = buildVoiceSummaryForChartOpen(
+            command,
+            patient,
+            sections,
+            editable
+          );
+          pushGeminiResponse(spoken || assistantResponse);
+          return true;
+        }
+
+        case "medication_order_draft":
+          setPendingMedicationOrder(action.payload);
+          setClinicalReasoning(null);
+          pushGeminiResponse(assistantResponse);
+          return true;
+
+        case "discharge_confirm":
+          setDischargeConfirmId(action.payload.patientId);
+          setPendingMedicationOrder(null);
+          pushGeminiResponse(assistantResponse);
+          return true;
+
+        case "update_problem_status": {
+          const patient = patients.find((p) => p.id === action.payload.patientId);
+          if (!patient) {
+            pushGeminiResponse("Patient not found.");
+            return true;
+          }
+          const status = action.payload.status as ProblemStatus;
+          const statusOk = PROBLEM_STATUS_OPTIONS.includes(status);
+          if (!statusOk) {
+            pushGeminiResponse(assistantResponse);
+            return true;
+          }
+          const existing = problemStateByPatient[patient.id] ?? [];
+          const problemKey = normalizeProblemKey(action.payload.problem);
+          const matched = existing.filter((item) =>
+            normalizeProblemKey(item.name).includes(problemKey)
+          );
+          if (!matched.length) {
+            pushGeminiResponse(
+              `Could not find problem "${action.payload.problem}" on ${patient.name}'s list.`
+            );
+            return true;
+          }
+          const ids = new Set(matched.map((m) => m.id));
+          setProblemStateByPatient((prev) => ({
+            ...prev,
+            [patient.id]: (prev[patient.id] ?? []).map((item) =>
+              ids.has(item.id) ? { ...item, status } : item
+            ),
+          }));
+          if (selectedPatientId !== patient.id) {
+            setSelectedPatientId(patient.id);
+          }
+          void openRequestedView(patient, ["diagnoses"]);
+          pushGeminiResponse(assistantResponse);
+          return true;
+        }
+
+        case "clinical_reasoning":
+          setClinicalReasoning(action.payload.reasoning);
+          setWorkspaceOpen(true);
+          setWorkspaceTab("response");
+          pushGeminiResponse(assistantResponse, "Gemini clinical reasoning");
+          return true;
+
+        case "admit_patient": {
+          const lower = command.toLowerCase();
+          if (isAdmitIntent(lower)) {
+            return false;
+          }
+          let draft: AdmissionDraft = {
+            active: true,
+            data: parseAdmissionBootstrap(command),
+            step: "chief_concern",
+            allergiesCaptured: false,
+            medicationsCaptured: false,
+            contextualAnswered: false,
+          };
+          draft = mergeAdmissionAnswer(draft, command);
+          setAdmissionConversation(draft);
+          pushGeminiResponse(
+            draft.step === "done"
+              ? "Ready to finalize admission."
+              : admissionPromptForStep(draft)
+          );
+          return true;
+        }
+
+        default:
+          if (assistantResponse) {
+            pushGeminiResponse(assistantResponse);
+            return true;
+          }
+          return false;
+      }
+    },
+    [
+      patients,
+      selectedPatientId,
+      problemStateByPatient,
+      openRequestedView,
+      voiceEnabled,
+      supportsTts,
+      activeRequestedSections,
+    ]
+  );
+
   const handleClinicalCommand = React.useCallback(
     async (commandText: string): Promise<boolean> => {
       const command = commandText.trim();
@@ -2895,6 +3183,94 @@ export default function VitalOsClient() {
       setError(null);
       setLastSubmittedTranscript(transcript);
       setLastCommand(transcript.trim());
+
+      if (isNegativeCommand(transcript)) {
+        if (pendingMedicationOrder) {
+          setPendingMedicationOrder(null);
+          pushLocalAssistantResponse(transcript, "Medication order cancelled.");
+          setSystemState("idle");
+          resumeVoiceCapture();
+          return;
+        }
+        if (dischargeConfirmId) {
+          setDischargeConfirmId(null);
+          pushLocalAssistantResponse(transcript, "Discharge cancelled.");
+          setSystemState("idle");
+          resumeVoiceCapture();
+          return;
+        }
+      }
+
+      if (pendingMedicationOrder && isAffirmativeCommand(transcript)) {
+        queueMedicationFromDraft(pendingMedicationOrder);
+        const draft = pendingMedicationOrder;
+        setPendingMedicationOrder(null);
+        pushLocalAssistantResponse(
+          transcript,
+          `Order placed. Pharmacy notified for ${draft.medication} — ${draft.patientName}.`
+        );
+        setSystemState("idle");
+        resumeVoiceCapture();
+        return;
+      }
+
+      if (dischargeConfirmId && isAffirmativeCommand(transcript)) {
+        const id = dischargeConfirmId;
+        const target = patients.find((p) => p.id === id);
+        const res = await fetch(`/api/patients/${encodeURIComponent(id)}`, {
+          method: "DELETE",
+        });
+        setDischargeConfirmId(null);
+        if (!res.ok) {
+          pushLocalAssistantResponse(transcript, "Discharge failed. Try again.");
+          setSystemState("idle");
+          resumeVoiceCapture();
+          return;
+        }
+        if (selectedPatientId === id) {
+          setRequestedPatientView(null);
+          setActiveRequestedSections([]);
+          setSelectedPatientId(null);
+        }
+        setOpenPatientTabIds((prev) => prev.filter((tabId) => tabId !== id));
+        await refreshPatients();
+        pushLocalAssistantResponse(
+          transcript,
+          `Discharged: ${target?.name ?? "patient"}. Roster updated.`
+        );
+        setSystemState("idle");
+        resumeVoiceCapture();
+        return;
+      }
+
+      let geminiHandled = false;
+      try {
+        const clinicalRes = await fetch("/api/clinical-command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            transcript,
+            activePatientId: selectedPatientId,
+            role: role ?? "doctor",
+            mode: finalMode,
+            conversationHistory: conversationTurnsRef.current,
+          }),
+        });
+        if (clinicalRes.ok) {
+          const clinicalData =
+            (await clinicalRes.json()) as ClinicalCommandResponse;
+          geminiHandled = await applyClinicalApiResult(transcript, clinicalData);
+        }
+      } catch {
+        geminiHandled = false;
+      }
+
+      if (geminiHandled) {
+        setSystemState("idle");
+        resumeVoiceCapture();
+        return;
+      }
+
       const handled = await handleClinicalCommand(transcript);
       if (handled) {
         setSystemState("idle");
@@ -3017,6 +3393,11 @@ export default function VitalOsClient() {
       voiceEnabled,
       refreshPatients,
       handleClinicalCommand,
+      applyClinicalApiResult,
+      queueMedicationFromDraft,
+      pendingMedicationOrder,
+      dischargeConfirmId,
+      pushLocalAssistantResponse,
       role,
       resumeVoiceCapture,
     ]
@@ -4782,6 +5163,8 @@ export default function VitalOsClient() {
             onClear={handleClear}
             emergencyArmed={emergencyArmed}
             audit={audit}
+            clinicalReasoning={clinicalReasoning}
+            pendingMedicationOrder={pendingMedicationOrder}
           />
         )}
       </AnimatePresence>
@@ -5121,6 +5504,8 @@ function WorkspaceOverlay({
   onClear,
   emergencyArmed,
   audit,
+  clinicalReasoning,
+  pendingMedicationOrder,
 }: {
   tab: "charts" | "response" | "dialogue" | "actions" | "system";
   onTab: (t: "charts" | "response" | "dialogue" | "actions" | "system") => void;
@@ -5144,6 +5529,8 @@ function WorkspaceOverlay({
   onClear: () => void;
   emergencyArmed: boolean;
   audit: AuditEntry[];
+  clinicalReasoning: ClinicalReasoningResult | null;
+  pendingMedicationOrder: PendingMedicationDraft | null;
 }) {
   const tabs: { id: typeof tab; label: string }[] = [
     { id: "charts", label: "Charts" },
@@ -5221,15 +5608,31 @@ function WorkspaceOverlay({
             </>
           )}
           {tab === "response" && (
-            <ResponsePanel
-              response={response}
-              systemState={systemState}
-              isBusy={isBusy}
-              onReplay={onReplay}
-              onStopSpeaking={onStopSpeaking}
-              voiceEnabled={voiceEnabled}
-              supportsTts={supportsTts}
-            />
+            <>
+              {pendingMedicationOrder && (
+                <motion.div
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="rounded-xl border border-amber-300/60 bg-amber-50/90 px-3 py-2 text-sm text-amber-950 shadow-sm"
+                >
+                  Pending order: {pendingMedicationOrder.medication} for{" "}
+                  {pendingMedicationOrder.patientName}. Say &quot;yes&quot; to
+                  confirm or &quot;cancel&quot; to discard.
+                </motion.div>
+              )}
+              {clinicalReasoning && (
+                <ClinicalReasoningPanel reasoning={clinicalReasoning} />
+              )}
+              <ResponsePanel
+                response={response}
+                systemState={systemState}
+                isBusy={isBusy}
+                onReplay={onReplay}
+                onStopSpeaking={onStopSpeaking}
+                voiceEnabled={voiceEnabled}
+                supportsTts={supportsTts}
+              />
+            </>
           )}
           {tab === "dialogue" && (
             <>
@@ -5305,6 +5708,131 @@ function ActionBar({
         <Eraser className="h-4 w-4" />
         Clear Session
       </Button>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Clinical reasoning (differential diagnosis)
+ * ────────────────────────────────────────────────────────────────────────── */
+
+function ClinicalReasoningPanel({
+  reasoning,
+}: {
+  reasoning: ClinicalReasoningResult;
+}) {
+  return (
+    <div className="panel space-y-3 p-4">
+      <motion.div
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="flex items-center gap-2"
+      >
+        <Sparkles className="h-4 w-4 text-clinical-cyan" />
+        <span className="mono text-xs uppercase tracking-wider text-muted-foreground">
+          differential diagnosis
+        </span>
+      </motion.div>
+      <p className="text-sm font-medium text-foreground">
+        Chief concern: {reasoning.chiefConcern}
+      </p>
+      {reasoning.symptomsUsed.length > 0 && (
+        <p className="text-xs text-muted-foreground">
+          Symptoms considered: {reasoning.symptomsUsed.join(", ")}
+        </p>
+      )}
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.05 }}
+        className="space-y-2"
+      >
+        {reasoning.possibleDiagnoses.map((dx, idx) => (
+          <div
+            key={`${dx.diagnosis}-${idx}`}
+            className="rounded-lg border border-border/70 bg-black/10 px-3 py-2"
+          >
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="flex flex-wrap items-center justify-between gap-2"
+            >
+              <p className="text-sm font-semibold text-foreground">{dx.diagnosis}</p>
+              <Badge variant="outline" className="text-[10px] uppercase">
+                {dx.likelihood}
+              </Badge>
+            </motion.div>
+            <p className="mt-1 text-xs leading-relaxed text-foreground/85">
+              {dx.whyItMatters}
+            </p>
+            {dx.supportingFindings.length > 0 && (
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Supporting: {dx.supportingFindings.join("; ")}
+              </p>
+            )}
+            {dx.missingOrContradictingFindings.length > 0 && (
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                Missing / contradicting:{" "}
+                {dx.missingOrContradictingFindings.join("; ")}
+              </p>
+            )}
+            {dx.suggestedNextChecks.length > 0 && (
+              <p className="mt-1 text-[11px] text-clinical-cyan">
+                Next checks: {dx.suggestedNextChecks.join("; ")}
+              </p>
+            )}
+          </div>
+        ))}
+      </motion.div>
+      {reasoning.redFlags.length > 0 && (
+        <div className="rounded-md border border-clinical-warn/40 bg-clinical-warn/10 px-3 py-2 text-xs text-clinical-warn">
+          <p className="font-semibold">Red flags to rule out</p>
+          <ul className="mt-1 list-disc pl-4">
+            {reasoning.redFlags.map((flag, i) => (
+              <li key={i}>{flag}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {(reasoning.recommendedQuestions.length > 0 ||
+        reasoning.recommendedChecks.length > 0) && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.1 }}
+          className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2"
+        >
+          {reasoning.recommendedQuestions.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, x: -6 }}
+              animate={{ opacity: 1, x: 0 }}
+            >
+              <p className="font-semibold text-foreground/80">Ask next</p>
+              <ul className="mt-1 list-disc pl-4">
+                {reasoning.recommendedQuestions.map((q, i) => (
+                  <li key={i}>{q}</li>
+                ))}
+              </ul>
+            </motion.div>
+          )}
+          {reasoning.recommendedChecks.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, x: 6 }}
+              animate={{ opacity: 1, x: 0 }}
+            >
+              <p className="font-semibold text-foreground/80">Check next</p>
+              <ul className="mt-1 list-disc pl-4">
+                {reasoning.recommendedChecks.map((c, i) => (
+                  <li key={i}>{c}</li>
+                ))}
+              </ul>
+            </motion.div>
+          )}
+        </motion.div>
+      )}
+      <p className="border-t border-border/60 pt-2 text-[11px] text-muted-foreground">
+        {reasoning.safetyNote}
+      </p>
     </div>
   );
 }
