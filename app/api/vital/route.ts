@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
-import { ACCESS_RESTRICTED_MESSAGE, type VitalRole } from "@/lib/auth";
+import {
+  API_AI_RESTRICTED_MESSAGE,
+  parseRole,
+  parseRoleFromRequest,
+  type VitalRole,
+} from "@/lib/auth";
 import { listPatients } from "@/lib/patient-store";
 import {
   runVital,
@@ -33,10 +38,6 @@ function parseHistory(raw: unknown): ConversationTurn[] {
     out.push({ role, content: content.trim() });
   }
   return out;
-}
-
-function parseRole(raw: unknown): VitalRole | null {
-  return raw === "doctor" || raw === "staff" ? raw : null;
 }
 
 export async function POST(req: Request) {
@@ -75,16 +76,11 @@ export async function POST(req: Request) {
       ? body.activePatientId.trim()
       : null;
 
-  const role = parseRole(body.role);
+  const role = parseRoleFromRequest(req, body.role);
   if (role !== "doctor") {
     return NextResponse.json(
-      {
-        text: ACCESS_RESTRICTED_MESSAGE,
-        mode,
-        model: "access-control",
-        latencyMs: 0,
-      },
-      { headers: { "Cache-Control": "no-store" } }
+      { error: API_AI_RESTRICTED_MESSAGE },
+      { status: 403, headers: { "Cache-Control": "no-store" } }
     );
   }
 

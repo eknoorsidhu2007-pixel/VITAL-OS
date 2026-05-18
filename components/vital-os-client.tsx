@@ -17,6 +17,7 @@ import {
   Home,
   Keyboard,
   Loader2,
+  LogOut,
   MessageCircle,
   Mic,
   MicOff,
@@ -43,7 +44,13 @@ import {
 } from "@/components/voice-hero-visual";
 import { VitalLogo } from "@/components/vital-logo";
 import { useAuth } from "@/components/auth-provider";
-import { ACCESS_RESTRICTED_MESSAGE } from "@/lib/auth";
+import {
+  ACCESS_RESTRICTED_MESSAGE,
+  AI_ASSISTANT_RESTRICTED_MESSAGE,
+  formatDoctorDisplayName,
+  roleRequestHeaders,
+  type VitalRole,
+} from "@/lib/auth";
 import type { ConversationTurn } from "@/lib/vital-llm";
 import type { ClinicalReasoningResult } from "@/lib/clinical-reasoning";
 import type { ClinicalCommandResponse } from "@/app/api/clinical-command/route";
@@ -358,7 +365,8 @@ function problemsToEditable(
 
 async function persistPatientProblems(
   patientId: string,
-  problems: EditableProblem[]
+  problems: EditableProblem[],
+  role: VitalRole
 ): Promise<boolean> {
   const payload = problems.map(({ name, status, since }) => ({
     name,
@@ -367,7 +375,10 @@ async function persistPatientProblems(
   }));
   const res = await fetch(`/api/patients/${encodeURIComponent(patientId)}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...roleRequestHeaders(role),
+    },
     body: JSON.stringify({ problems: payload }),
   });
   return res.ok;
@@ -1827,7 +1838,8 @@ function parseVoiceCommand(
  * ────────────────────────────────────────────────────────────────────────── */
 
 export default function VitalOsClient() {
-  const { role, logout } = useAuth();
+  const { role, user, permissions, logout } = useAuth();
+  const apiRole = role as VitalRole;
   const [systemState, setSystemState] = React.useState<SystemState>("idle");
   const [mode, setMode] = React.useState<VitalMode>("general");
   const [emergencyArmed, setEmergencyArmed] = React.useState(false);
@@ -2791,18 +2803,30 @@ export default function VitalOsClient() {
         }
 
         case "medication_order_draft":
+          if (!permissions.canCreateMedicationOrders) {
+            pushGeminiResponse(ACCESS_RESTRICTED_MESSAGE);
+            return true;
+          }
           setPendingMedicationOrder(action.payload);
           setClinicalReasoning(null);
           pushGeminiResponse(assistantResponse);
           return true;
 
         case "discharge_confirm":
+          if (!permissions.canDischargePatient) {
+            pushGeminiResponse(ACCESS_RESTRICTED_MESSAGE);
+            return true;
+          }
           setDischargeConfirmId(action.payload.patientId);
           setPendingMedicationOrder(null);
           pushGeminiResponse(assistantResponse);
           return true;
 
         case "update_problem_status": {
+          if (!permissions.canEditPatientStatus) {
+            pushGeminiResponse(ACCESS_RESTRICTED_MESSAGE);
+            return true;
+          }
           const patient = patients.find((p) => p.id === action.payload.patientId);
           if (!patient) {
             pushGeminiResponse("Patient not found.");
@@ -2841,6 +2865,10 @@ export default function VitalOsClient() {
         }
 
         case "clinical_reasoning":
+          if (!permissions.canUseAI) {
+            pushGeminiResponse(ACCESS_RESTRICTED_MESSAGE);
+            return true;
+          }
           setClinicalReasoning(action.payload.reasoning);
           setWorkspaceOpen(true);
           setWorkspaceTab("response");
@@ -2848,6 +2876,10 @@ export default function VitalOsClient() {
           return true;
 
         case "admit_patient": {
+          if (!permissions.canAdmitPatient) {
+            pushGeminiResponse(ACCESS_RESTRICTED_MESSAGE);
+            return true;
+          }
           const lower = command.toLowerCase();
           if (isAdmitIntent(lower)) {
             return false;
@@ -2886,6 +2918,7 @@ export default function VitalOsClient() {
       voiceEnabled,
       supportsTts,
       activeRequestedSections,
+      permissions,
     ]
   );
 
@@ -2903,7 +2936,17 @@ export default function VitalOsClient() {
         return true;
       }
 
-      if (role === "staff" && isPatientDataRequest(command)) {
+      if (!permissions.canAdmitPatient && isAdmitIntent(lower)) {
+        pushLocalAssistantResponse(command, ACCESS_RESTRICTED_MESSAGE);
+        return true;
+      }
+
+      if (!permissions.canDischargePatient && isDischargeIntent(lower)) {
+        pushLocalAssistantResponse(command, ACCESS_RESTRICTED_MESSAGE);
+        return true;
+      }
+
+      if (!permissions.canEditPatientStatus && matchesStatusIntent(command)) {
         pushLocalAssistantResponse(command, ACCESS_RESTRICTED_MESSAGE);
         return true;
       }
@@ -2922,7 +2965,10 @@ export default function VitalOsClient() {
         }
         const res = await fetch("/api/patients", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...roleRequestHeaders(apiRole),
+          },
           body: JSON.stringify(buildAdmissionPayload(draft.data)),
         });
         if (!res.ok) {
@@ -2976,6 +3022,7 @@ export default function VitalOsClient() {
         for (const target of targets) {
           const res = await fetch(`/api/patients/${encodeURIComponent(target.id)}`, {
             method: "DELETE",
+            headers: roleRequestHeaders(apiRole),
           });
           if (!res.ok) {
             pushLocalAssistantResponse(command, "Discharge failed. Try again.");
@@ -3046,9 +3093,11 @@ export default function VitalOsClient() {
           ...prev,
           [target.id]: updatedProblems,
         }));
-        void persistPatientProblems(target.id, updatedProblems).then((ok) => {
-          if (ok) void refreshPatients();
-        });
+        void persistPatientProblems(target.id, updatedProblems, apiRole).then(
+          (ok) => {
+            if (ok) void refreshPatients();
+          }
+        );
         if (selectedPatientId !== target.id) {
           setSelectedPatientId(target.id);
         }
@@ -3143,6 +3192,10 @@ export default function VitalOsClient() {
 
       const orderIntent = extractMedicationOrderIntent(command, patients);
       if (orderIntent) {
+        if (!permissions.canCreateMedicationOrders) {
+          pushLocalAssistantResponse(command, ACCESS_RESTRICTED_MESSAGE);
+          return true;
+        }
         if (orderIntent.uncertain) {
           pushLocalAssistantResponse(
             command,
@@ -3200,6 +3253,8 @@ export default function VitalOsClient() {
       pushLocalAssistantResponse,
       problemStateByPatient,
       role,
+      permissions,
+      apiRole,
       refreshPatients,
       resumeVoiceCapture,
       logout,
@@ -3223,6 +3278,13 @@ export default function VitalOsClient() {
       setError(null);
       setLastSubmittedTranscript(transcript);
       setLastCommand(transcript.trim());
+
+      if (!permissions.canUseAI) {
+        pushLocalAssistantResponse(transcript, AI_ASSISTANT_RESTRICTED_MESSAGE);
+        setSystemState("idle");
+        resumeVoiceCapture();
+        return;
+      }
 
       if (isNegativeCommand(transcript)) {
         if (pendingMedicationOrder) {
@@ -3259,6 +3321,7 @@ export default function VitalOsClient() {
         const target = patients.find((p) => p.id === id);
         const res = await fetch(`/api/patients/${encodeURIComponent(id)}`, {
           method: "DELETE",
+          headers: roleRequestHeaders(apiRole),
         });
         setDischargeConfirmId(null);
         if (!res.ok) {
@@ -3291,7 +3354,7 @@ export default function VitalOsClient() {
           body: JSON.stringify({
             transcript,
             activePatientId: selectedPatientId,
-            role: role ?? "doctor",
+            role: apiRole,
             mode: finalMode,
             conversationHistory: conversationTurnsRef.current,
           }),
@@ -3335,7 +3398,7 @@ export default function VitalOsClient() {
             patientContext: overrideContext ?? patientSnapshot ?? "",
             conversationHistory: conversationTurnsRef.current,
             activePatientId: routedPatientId,
-            role: role ?? "doctor",
+            role: apiRole,
           }),
           signal: ctrl.signal,
         });
@@ -3439,11 +3502,26 @@ export default function VitalOsClient() {
       dischargeConfirmId,
       pushLocalAssistantResponse,
       role,
+      permissions,
+      apiRole,
       resumeVoiceCapture,
     ]
   );
 
   submitRef.current = submit;
+
+  React.useEffect(() => {
+    if (permissions.canViewReports && permissions.canViewAnalytics && permissions.canViewSettings) {
+      return;
+    }
+    if (
+      activePage === "reports" ||
+      activePage === "analytics" ||
+      activePage === "settings"
+    ) {
+      setActivePage("dashboard");
+    }
+  }, [activePage, permissions]);
 
   /* ──────────────────────────────────────────────────────────────────────
    * Speech synthesis
@@ -3626,7 +3704,8 @@ export default function VitalOsClient() {
     resetSession();
     setMicMuted(false);
     setSystemState("idle");
-  }, [disposeRecognition, resetSession]);
+    logout();
+  }, [disposeRecognition, resetSession, logout]);
 
   const toggleMicMute = React.useCallback(() => {
     if (!voiceSessionLive) {
@@ -3897,13 +3976,30 @@ export default function VitalOsClient() {
           </div>
           <nav className="space-y-2">
             {[
-              { key: "dashboard" as ActivePage, label: "Dashboard", icon: Home },
-              { key: "patients" as ActivePage, label: "Patients", icon: Users },
-              { key: "encounters" as ActivePage, label: "Encounters", icon: NotebookTabs },
-              { key: "reports" as ActivePage, label: "Reports", icon: FileBarChart2 },
-              { key: "analytics" as ActivePage, label: "Analytics", icon: BarChart3 },
-              { key: "settings" as ActivePage, label: "Settings", icon: Settings },
-            ].map((item) => {
+              { key: "dashboard" as ActivePage, label: "Dashboard", icon: Home, show: true },
+              { key: "patients" as ActivePage, label: "Patients", icon: Users, show: true },
+              { key: "encounters" as ActivePage, label: "Encounters", icon: NotebookTabs, show: true },
+              {
+                key: "reports" as ActivePage,
+                label: "Reports",
+                icon: FileBarChart2,
+                show: permissions.canViewReports,
+              },
+              {
+                key: "analytics" as ActivePage,
+                label: "Analytics",
+                icon: BarChart3,
+                show: permissions.canViewAnalytics,
+              },
+              {
+                key: "settings" as ActivePage,
+                label: "Settings",
+                icon: Settings,
+                show: permissions.canViewSettings,
+              },
+            ]
+              .filter((item) => item.show)
+              .map((item) => {
               const Icon = item.icon;
               return (
                 <button
@@ -3923,8 +4019,19 @@ export default function VitalOsClient() {
               );
             })}
           </nav>
-          <div className="mt-auto rounded-xl border border-white/10 bg-white/5 p-2 text-center text-[11px] text-blue-100/80">
-            HIPAA Secure
+          <div className="mt-auto flex flex-col gap-2 pt-4">
+            <button
+              type="button"
+              onClick={endVoiceSession}
+              className="flex h-12 w-full flex-col items-center justify-center gap-1 rounded-xl px-2 text-center text-[11px] font-medium text-blue-100/85 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
+              title="Sign out and return to role selection"
+            >
+              <LogOut className="h-4 w-4 shrink-0" aria-hidden />
+              <span className="leading-none">Sign Out</span>
+            </button>
+            <div className="rounded-xl border border-white/10 bg-white/5 p-2 text-center text-[11px] text-blue-100/80">
+              HIPAA Secure
+            </div>
           </div>
         </aside>
 
@@ -3947,7 +4054,13 @@ export default function VitalOsClient() {
                 variant="notes"
                 className="bg-teal-100/95 text-teal-950 border-teal-300/90"
               >
-                Session Active
+                {role === "doctor" && user?.doctorId
+                  ? `Doctor Mode · ${formatDoctorDisplayName(user.userName)}`
+                  : role === "doctor"
+                    ? "Doctor Mode"
+                    : role === "staff" && user?.staffId
+                      ? `Staff Mode · ${user.userName}`
+                      : "Staff Mode"}
               </Badge>
               {mode !== "general" && (
                 <Badge variant="medications">
@@ -3963,15 +4076,22 @@ export default function VitalOsClient() {
               <button
                 type="button"
                 onClick={toggleMicMute}
-                disabled={!supportsSpeech || systemState === "processing"}
+                disabled={
+                  !permissions.canUseAI ||
+                  !supportsSpeech ||
+                  systemState === "processing"
+                }
                 className={cn(
                   "flex h-14 w-14 items-center justify-center rounded-full border-2 transition-all",
                   voiceSessionLive && !micMuted
                     ? "border-blue-500 bg-blue-50 text-blue-700"
-                    : "border-slate-300 bg-white text-slate-700"
+                    : "border-slate-300 bg-white text-slate-700",
+                  !permissions.canUseAI && "cursor-not-allowed opacity-50"
                 )}
                 title={
-                  !voiceSessionLive
+                  !permissions.canUseAI
+                    ? AI_ASSISTANT_RESTRICTED_MESSAGE
+                    : !voiceSessionLive
                     ? "Start voice session"
                     : voiceSessionLive && !micMuted
                     ? "Mic live - tap to mute"
@@ -4020,7 +4140,12 @@ export default function VitalOsClient() {
                 {error ? (
                   <p className="mt-2 text-xs text-red-600">{error}</p>
                 ) : null}
-                {typedCommandOpen && (
+                {!permissions.canUseAI ? (
+                  <p className="mt-2 text-xs text-amber-800">
+                    {AI_ASSISTANT_RESTRICTED_MESSAGE}
+                  </p>
+                ) : null}
+                {typedCommandOpen && permissions.canUseAI && (
                   <input
                     value={typedCommand}
                     onChange={(e) => setTypedCommand(e.target.value)}
@@ -4039,9 +4164,20 @@ export default function VitalOsClient() {
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setTypedCommandOpen((v) => !v)}
-                  className="flex h-10 w-10 items-center justify-center rounded-full border border-slate-300 bg-white"
-                  title="Toggle typed command"
+                  onClick={() => {
+                    if (!permissions.canUseAI) return;
+                    setTypedCommandOpen((v) => !v);
+                  }}
+                  disabled={!permissions.canUseAI}
+                  className={cn(
+                    "flex h-10 w-10 items-center justify-center rounded-full border border-slate-300 bg-white",
+                    !permissions.canUseAI && "cursor-not-allowed opacity-50"
+                  )}
+                  title={
+                    permissions.canUseAI
+                      ? "Toggle typed command"
+                      : AI_ASSISTANT_RESTRICTED_MESSAGE
+                  }
                 >
                   <Keyboard className="h-4 w-4" />
                 </button>
@@ -4103,14 +4239,16 @@ export default function VitalOsClient() {
                         placeholder="Search name, MRN, room..."
                         className="w-64 rounded-lg border border-slate-200 px-3 py-1.5 text-sm text-slate-900 outline-none focus:border-blue-300"
                       />
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setAdmitFormOpen((open) => !open)}
-                      >
-                        Admit Patient
-                      </Button>
+                      {permissions.canAdmitPatient ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setAdmitFormOpen((open) => !open)}
+                        >
+                          Admit Patient
+                        </Button>
+                      ) : null}
                     </motion.div>
                   </div>
                   <AnimatePresence initial={false}>
@@ -4179,7 +4317,10 @@ export default function VitalOsClient() {
                               void (async () => {
                                 const res = await fetch("/api/patients", {
                                   method: "POST",
-                                  headers: { "Content-Type": "application/json" },
+                                  headers: {
+                                    "Content-Type": "application/json",
+                                    ...roleRequestHeaders(apiRole),
+                                  },
                                   body: JSON.stringify({
                                     name: admitDraft.name.trim(),
                                     room: admitDraft.room.trim(),
@@ -4274,7 +4415,9 @@ export default function VitalOsClient() {
                           className="flex items-center justify-end"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          {dischargeConfirmId === p.id ? (
+                          {!permissions.canDischargePatient ? (
+                            <span className="text-[10px] text-slate-500">—</span>
+                          ) : dischargeConfirmId === p.id ? (
                             <div className="flex items-center gap-1 text-xs text-slate-700">
                               <span>Confirm discharge?</span>
                               <Button
@@ -4294,7 +4437,10 @@ export default function VitalOsClient() {
                                   void (async () => {
                                     const res = await fetch(
                                       `/api/patients/${encodeURIComponent(p.id)}`,
-                                      { method: "DELETE" }
+                                      {
+                                        method: "DELETE",
+                                        headers: roleRequestHeaders(apiRole),
+                                      }
                                     );
                                     if (!res.ok) return;
                                     setDischargeConfirmId(null);
@@ -4857,37 +5003,42 @@ export default function VitalOsClient() {
                       className="grid grid-cols-[2fr_1fr_1fr] border-b border-slate-100 px-2 py-1.5 text-sm last:border-b-0"
                     >
                       <span className="font-medium text-slate-900">{name}</span>
-                      <div className="flex flex-wrap items-center gap-1">
-                        <select
-                          value={status}
-                          onChange={(e) => {
-                            if (!activePatient) return;
-                            const nextStatus = e.target.value as ProblemStatus;
-                            const updatedProblems = (
-                              problemStateByPatient[activePatient.id] ?? []
-                            ).map((item) =>
-                              item.id === id ? { ...item, status: nextStatus } : item
-                            );
-                            setProblemStateByPatient((prev) => ({
-                              ...prev,
-                              [activePatient.id]: updatedProblems,
-                            }));
-                            setProblemStatusFlashId(`${id}-${nextStatus}`);
-                            void persistPatientProblems(
-                              activePatient.id,
-                              updatedProblems
-                            ).then((ok) => {
-                              if (ok) void refreshPatients();
-                            });
-                          }}
-                          className="h-7 rounded-md border border-slate-200 bg-white px-1 text-[10px] text-slate-900"
-                        >
-                          {PROBLEM_STATUS_OPTIONS.map((option) => (
-                            <option key={option} value={option}>
-                              {option}
-                            </option>
-                          ))}
-                        </select>
+                      <motion.div className="flex flex-wrap items-center gap-1">
+                        {permissions.canEditPatientStatus ? (
+                          <select
+                            value={status}
+                            onChange={(e) => {
+                              if (!activePatient) return;
+                              const nextStatus = e.target.value as ProblemStatus;
+                              const updatedProblems = (
+                                problemStateByPatient[activePatient.id] ?? []
+                              ).map((item) =>
+                                item.id === id ? { ...item, status: nextStatus } : item
+                              );
+                              setProblemStateByPatient((prev) => ({
+                                ...prev,
+                                [activePatient.id]: updatedProblems,
+                              }));
+                              setProblemStatusFlashId(`${id}-${nextStatus}`);
+                              void persistPatientProblems(
+                                activePatient.id,
+                                updatedProblems,
+                                apiRole
+                              ).then((ok) => {
+                                if (ok) void refreshPatients();
+                              });
+                            }}
+                            className="h-7 rounded-md border border-slate-200 bg-white px-1 text-[10px] text-slate-900"
+                          >
+                            {PROBLEM_STATUS_OPTIONS.map((option) => (
+                              <option key={option} value={option}>
+                                {option}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="text-xs font-medium text-slate-800">{status}</span>
+                        )}
                         <Badge
                           variant={problemStatusBadgeVariant(status)}
                           className="w-fit text-[10px] transition-all duration-300"
@@ -4906,7 +5057,7 @@ export default function VitalOsClient() {
                             </motion.span>
                           )}
                         </AnimatePresence>
-                      </div>
+                      </motion.div>
                       <span className="text-slate-900">{since}</span>
                     </motion.div>
                   ))}
@@ -4916,7 +5067,7 @@ export default function VitalOsClient() {
             )}
 
             {activePatient && (showSection("vitals") || showSection("labs")) && (
-            <div className="rounded-xl border border-[#e3edf9] border-l-4 border-l-teal-300 bg-teal-50/20 p-3 shadow-sm">
+            <motion.div className="rounded-xl border border-[#e3edf9] border-l-4 border-l-teal-300 bg-teal-50/20 p-3 shadow-sm">
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-sm font-semibold text-slate-900">Recent Notes / Vitals</p>
                 <Badge variant="notes" className="text-xs">
@@ -4930,11 +5081,11 @@ export default function VitalOsClient() {
                     <span className="font-medium text-slate-900">{v}</span>
                   </div>
                 ))}
-                <div className="col-span-2 rounded-lg bg-slate-50 px-2 py-1.5 text-xs text-slate-700">
+                <motion.div className="col-span-2 rounded-lg bg-slate-50 px-2 py-1.5 text-xs text-slate-700">
                   {activePatient?.chartNote || "No recent notes"}
-                </div>
+                </motion.div>
               </div>
-            </div>
+            </motion.div>
             )}
           </div>
           )}

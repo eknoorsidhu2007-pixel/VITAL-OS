@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 
 import {
+  DOCTOR_ONLY_API_MESSAGE,
+  isRestrictedClinicalPatch,
+  parseRoleFromRequest,
+} from "@/lib/auth";
+import {
   deletePatientById,
   getPatientById,
   updatePatientById,
@@ -32,6 +37,18 @@ export async function PATCH(req: Request, ctx: Ctx) {
   const { id } = ctx.params;
   try {
     const patch = (await req.json().catch(() => ({}))) as unknown;
+    const role = parseRoleFromRequest(
+      req,
+      patch && typeof patch === "object"
+        ? (patch as Record<string, unknown>).role
+        : undefined
+    );
+    if (isRestrictedClinicalPatch(patch) && role !== "doctor") {
+      return NextResponse.json(
+        { error: DOCTOR_ONLY_API_MESSAGE },
+        { status: 403 }
+      );
+    }
     const res = await updatePatientById(decodeURIComponent(id), patch);
     if (!res) {
       return NextResponse.json({ error: "Not found." }, { status: 404 });
@@ -46,9 +63,16 @@ export async function PATCH(req: Request, ctx: Ctx) {
   }
 }
 
-export async function DELETE(_req: Request, ctx: Ctx) {
+export async function DELETE(req: Request, ctx: Ctx) {
   const { id } = ctx.params;
   try {
+    const role = parseRoleFromRequest(req);
+    if (role !== "doctor") {
+      return NextResponse.json(
+        { error: DOCTOR_ONLY_API_MESSAGE },
+        { status: 403 }
+      );
+    }
     const res = await deletePatientById(decodeURIComponent(id));
     if (!res) {
       return NextResponse.json({ error: "Not found." }, { status: 404 });
