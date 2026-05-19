@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, Shield, Stethoscope, UserRound } from "lucide-react";
+import { ArrowLeft, Eye, EyeOff, Shield, Stethoscope, UserRound } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { VitalLogo } from "@/components/vital-logo";
@@ -31,13 +31,13 @@ const ROLE_OPTIONS: Array<{
   {
     role: "doctor",
     title: "Doctor",
-    description: "Sign in with your Doctor ID and full name.",
+    description: "Sign in with your Doctor ID and username.",
     icon: <Stethoscope className="h-5 w-5 text-clinical-teal" aria-hidden />,
   },
   {
     role: "staff",
     title: "Staff",
-    description: "Sign in with your Staff ID and full name.",
+    description: "Sign in with your Staff ID and username.",
     icon: <UserRound className="h-5 w-5 text-clinical-cyan" aria-hidden />,
   },
 ];
@@ -78,6 +78,7 @@ export function LoginScreen() {
   const [step, setStep] = React.useState<LoginStep>("role");
   const [fullName, setFullName] = React.useState("");
   const [credentialId, setCredentialId] = React.useState("");
+  const [showCredentialId, setShowCredentialId] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
 
@@ -85,6 +86,7 @@ export function LoginScreen() {
     setError(null);
     setFullName("");
     setCredentialId("");
+    setShowCredentialId(false);
     if (role === "doctor") {
       setStep("doctor");
       return;
@@ -118,6 +120,7 @@ export function LoginScreen() {
     setError(null);
     setFullName("");
     setCredentialId("");
+    setShowCredentialId(false);
   };
 
   const credentialForm = step !== "role" ? CREDENTIAL_FORMS[step] : null;
@@ -176,7 +179,7 @@ export function LoginScreen() {
                   {credentialForm.heading}
                 </h1>
                 <p className="text-sm text-muted-foreground">
-                  Demo credentials only — use your assigned name and ID.
+                  Demo credentials only — use your assigned username and ID.
                 </p>
               </div>
               <form
@@ -185,7 +188,7 @@ export function LoginScreen() {
               >
                 <label className="space-y-1.5">
                   <span className="text-xs font-medium text-muted-foreground">
-                    Full name
+                    Username
                   </span>
                   <input
                     type="text"
@@ -194,8 +197,8 @@ export function LoginScreen() {
                       setFullName(e.target.value);
                       setError(null);
                     }}
-                    autoComplete="name"
-                    placeholder="Enter your full name"
+                    autoComplete="username"
+                    placeholder="Enter your username"
                     className={LOGIN_INPUT_CLASS}
                   />
                 </label>
@@ -203,18 +206,32 @@ export function LoginScreen() {
                   <span className="text-xs font-medium text-muted-foreground">
                     {credentialForm.idLabel}
                   </span>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={credentialId}
-                    onChange={(e) => {
-                      setCredentialId(e.target.value);
-                      setError(null);
-                    }}
-                    autoComplete="off"
-                    placeholder={credentialForm.idPlaceholder}
-                    className={LOGIN_INPUT_CLASS}
-                  />
+                  <div className="relative">
+                    <input
+                      type={showCredentialId ? "text" : "password"}
+                      inputMode="numeric"
+                      value={credentialId}
+                      onChange={(e) => {
+                        setCredentialId(e.target.value);
+                        setError(null);
+                      }}
+                      autoComplete="off"
+                      placeholder={credentialForm.idPlaceholder}
+                      className={`${LOGIN_INPUT_CLASS} pr-10`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowCredentialId((v) => !v)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-muted-foreground transition hover:bg-white/[0.06] hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-clinical-teal/40"
+                      aria-label={showCredentialId ? "Hide ID" : "Show ID"}
+                    >
+                      {showCredentialId ? (
+                        <EyeOff className="h-4 w-4" aria-hidden />
+                      ) : (
+                        <Eye className="h-4 w-4" aria-hidden />
+                      )}
+                    </button>
+                  </div>
                 </label>
                 {error ? (
                   <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">

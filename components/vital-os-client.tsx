@@ -56,6 +56,13 @@ import type { ClinicalReasoningResult } from "@/lib/clinical-reasoning";
 import type { ClinicalCommandResponse } from "@/app/api/clinical-command/route";
 import type { DemoMedication, DemoPatient } from "@/lib/demo-patients";
 import { patientToSnapshot } from "@/lib/demo-patients";
+import {
+  hasRequiredAdmissionFields,
+  isExplicitAllergyAnswer,
+  isExplicitEmergencyContactAnswer,
+  mergeParsedIntoPatientData,
+  parseAdmissionCommand,
+} from "@/lib/admission-parser";
 
 /* ──────────────────────────────────────────────────────────────────────────
  * Types
@@ -1079,36 +1086,11 @@ function admissionFirstName(data: Partial<DemoPatient>): string {
   return data.name?.trim().split(/\s+/)[0] ?? "the patient";
 }
 
-function normalizeAdmissionRoom(room: string): string {
-  const trimmed = room.trim();
-  if (!trimmed) return "Unassigned";
-  if (/^room\b/i.test(trimmed)) {
-    return trimmed.replace(/^room\s*/i, "Room ");
-  }
-  return `Room ${trimmed}`;
-}
-
 function normalizeMedicationSig(sig: string): string {
   return sig
     .replace(/\bonce a day\b/i, "PO daily")
     .replace(/\btwice a day\b/i, "PO BID")
     .replace(/\bthree times a day\b/i, "PO TID");
-}
-
-function parseAgeSex(text: string): { age?: number; sex?: string } {
-  const out: { age?: number; sex?: string } = {};
-  const ageMatch = text.match(/\b(\d{1,3})\s*(?:years?\s*old|y\.?o\.?)?\b/i);
-  if (ageMatch) out.age = Number(ageMatch[1]);
-  const sexMatch =
-    text.match(/\b(male|female|man|woman|nonbinary|non-binary|nb)\b/i) ??
-    text.match(/\b([mf])\b/i);
-  if (sexMatch) {
-    const token = sexMatch[1].toLowerCase();
-    if (token === "m" || token === "male" || token === "man") out.sex = "M";
-    else if (token === "f" || token === "female" || token === "woman") out.sex = "F";
-    else out.sex = sexMatch[1];
-  }
-  return out;
 }
 
 function parseAllergiesAnswer(text: string): string[] | null {
@@ -1117,16 +1099,32 @@ function parseAllergiesAnswer(text: string): string[] | null {
   if (/^(no|none|no allergies|none known|nkda|nka|not aware of any)\b/i.test(q)) {
     return [];
   }
-  return q
-    .split(/\s*,\s*|\s+and\s+/i)
-    .map((item) => item.trim())
-    .filter(Boolean);
+  if (!isExplicitAllergyAnswer(q)) return null;
+  const match = q.match(
+    /\b(?:allergic to|allergy to|allergies are)\s+(.+)$/i
+  );
+  if (match?.[1]) {
+    return match[1]
+      .split(/\s*,\s*|\s+and\s+/i)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return null;
 }
 
 function parseMedicationsAnswer(text: string): DemoMedication[] | null {
   const q = text.trim();
   if (!q) return null;
   if (/^(no|none|no medications|not on any|nkda|n\/a)\b/i.test(q)) return [];
+  const parsed = parseAdmissionCommand(q);
+  if (parsed.medication) {
+    return [
+      {
+        name: parsed.medication.name,
+        sig: parsed.medication.dose ?? "As directed",
+      },
+    ];
+  }
   const segment = q.replace(/^(?:just|only)\s+/i, "").trim();
   const meds: DemoMedication[] = [];
   const parts = segment.split(/\s*,\s*|\s+and\s+/i).filter(Boolean);
@@ -1139,103 +1137,39 @@ function parseMedicationsAnswer(text: string): DemoMedication[] | null {
         name: medMatch[1].trim(),
         sig: normalizeMedicationSig(medMatch[2].trim()),
       });
-    } else {
+    } else if (!/\b(?:needs?|he|she|they)\b/i.test(part)) {
       meds.push({ name: part.trim(), sig: "As directed" });
     }
   }
   return meds.length ? meds : null;
 }
 
-function parseChiefConcernAndRoom(text: string): {
-  chiefConcern?: string;
-  room?: string;
-} {
+function parseEmergencyContactAnswer(
+  text: string
+): DemoPatient["emergencyContact"] | null {
+  if (!isExplicitEmergencyContactAnswer(text)) return null;
   const trimmed = text.trim();
-  if (!trimmed) return {};
-  const roomMatch =
-    trimmed.match(/\b(?:room|in)\s+([A-Za-z0-9-]+)\b/i) ??
-    trimmed.match(/,\s*([A-Za-z0-9-]+)\s*$/);
-  let chiefConcern = trimmed;
-  let room: string | undefined;
-  if (roomMatch) {
-    room = normalizeAdmissionRoom(roomMatch[1]);
-    chiefConcern = trimmed.replace(roomMatch[0], "").replace(/,\s*$/, "").trim();
-  }
-  chiefConcern = chiefConcern.replace(/^(?:chief concern|presenting complaint)\s*[:,-]?\s*/i, "").trim();
-  return {
-    chiefConcern: chiefConcern || undefined,
-    room,
-  };
-}
-
-function parseEmergencyContactAnswer(text: string): DemoPatient["emergencyContact"] | null {
-  const trimmed = text.trim();
-  if (!trimmed || /^(no|none|not at this time|unknown)\b/i.test(trimmed)) {
+  if (/^(no|none|not at this time|unknown)\b/i.test(trimmed)) {
     return { name: "Not listed", relationship: "Not listed", phone: "Not listed" };
   }
   const phoneMatch = trimmed.match(/\b(\d{3}[-.\s]?\d{3}[-.\s]?\d{4})\b/);
-  const relationshipMatch = trimmed.match(/\b(spouse|partner|parent|mother|father|sibling|child|friend)\b/i);
+  const relationshipMatch = trimmed.match(
+    /\b(spouse|partner|parent|mother|father|sibling|child|friend)\b/i
+  );
   const namePart = trimmed
     .replace(phoneMatch?.[0] ?? "", "")
     .replace(relationshipMatch?.[0] ?? "", "")
-    .replace(/\b(contact|is|the)\b/gi, "")
+    .replace(/\b(?:emergency contact is|contact is|primary contact is|phone number is|contact|is|the)\b/gi, "")
     .trim();
   return {
-    name: namePart || trimmed,
+    name: namePart || "Not listed",
     relationship: relationshipMatch?.[1] ?? "Contact",
     phone: phoneMatch?.[1] ?? "Not listed",
   };
 }
 
-function stripAdmissionPrefix(command: string): string {
-  return command
-    .replace(
-      /^(?:please\s+)?(?:admit|add patient|new patient)(?:\s+a)?(?:\s+new patient)?(?:\s+named)?[,:]?\s*/i,
-      ""
-    )
-    .trim();
-}
-
 function parseAdmissionBootstrap(command: string): Partial<DemoPatient> {
-  let rest = stripAdmissionPrefix(command);
-  rest = rest.replace(/^(?:a\s+)?new patient[,:]?\s*/i, "").trim();
-  const data: Partial<DemoPatient> = {};
-  if (!rest) return data;
-
-  const parts = rest.split(",").map((part) => part.trim()).filter(Boolean);
-  if (parts.length >= 3) {
-    data.name = parts[0];
-    data.chiefConcern = parts.slice(1, -1).join(", ") || parts[1];
-    data.room = normalizeAdmissionRoom(parts[parts.length - 1].replace(/^room\s*/i, ""));
-    return data;
-  }
-  if (parts.length === 2) {
-    data.name = parts[0];
-    const second = parts[1];
-    const concernRoom = parseChiefConcernAndRoom(second);
-    if (concernRoom.room) data.room = concernRoom.room;
-    if (concernRoom.chiefConcern) data.chiefConcern = concernRoom.chiefConcern;
-    if (!data.chiefConcern && !data.room) data.chiefConcern = second;
-    return data;
-  }
-
-  const token = parts[0] ?? rest;
-  const concernRoom = parseChiefConcernAndRoom(token);
-  if (concernRoom.room) {
-    data.room = concernRoom.room;
-    if (concernRoom.chiefConcern) data.chiefConcern = concernRoom.chiefConcern;
-    return data;
-  }
-  if (
-    /\b(pain|fever|nausea|injury|bleeding|shortness|chest|abdominal|seizure|trauma)\b/i.test(
-      token
-    )
-  ) {
-    data.chiefConcern = token;
-    return data;
-  }
-  data.name = token.replace(/[?.!]+$/, "").trim();
-  return data;
+  return mergeParsedIntoPatientData({}, parseAdmissionCommand(command));
 }
 
 function isSeriousAdmissionCase(data: Partial<DemoPatient>): boolean {
@@ -1250,12 +1184,12 @@ function isSeriousAdmissionCase(data: Partial<DemoPatient>): boolean {
 
 function resolveAdmissionStep(draft: AdmissionDraft): AdmissionStep {
   const data = draft.data;
-  if (!data.name?.trim() || !data.chiefConcern?.trim() || !data.room?.trim()) {
-    return "chief_concern";
-  }
+  if (!hasRequiredAdmissionFields(data)) return "chief_concern";
   if (data.age === undefined || !data.sex?.trim()) return "age_sex";
   if (!draft.allergiesCaptured) return "allergies";
-  if (!draft.medicationsCaptured) return "medications";
+  if (!draft.medicationsCaptured && !(data.medications?.length ?? 0)) {
+    return "medications";
+  }
   if (!draft.contextualAnswered) return "contextual";
   return "done";
 }
@@ -1264,10 +1198,20 @@ function admissionPromptForStep(draft: AdmissionDraft): string {
   const firstName = admissionFirstName(draft.data);
   switch (draft.step) {
     case "chief_concern":
-      if (draft.data.name?.trim()) {
-        return `Got it. What's ${firstName}'s chief concern and what room are they in?`;
+      if (!draft.data.name?.trim()) {
+        const notedMed = draft.data.medications?.[0]?.name;
+        if (notedMed) {
+          return `I noted ${notedMed}. Who is the patient you want to admit?`;
+        }
+        return "Who is the patient you want to admit?";
       }
-      return "What is the patient's name, chief concern, and room assignment?";
+      if (!draft.data.room?.trim()) {
+        return `What room should ${firstName} be assigned to?`;
+      }
+      if (!draft.data.chiefConcern?.trim()) {
+        return `What is ${firstName}'s chief concern?`;
+      }
+      return `Got it. What's ${firstName}'s chief concern and what room are they in?`;
     case "age_sex":
       return `How old is ${firstName} and what's their sex?`;
     case "allergies":
@@ -1284,44 +1228,49 @@ function admissionPromptForStep(draft: AdmissionDraft): string {
 }
 
 function mergeAdmissionAnswer(draft: AdmissionDraft, command: string): AdmissionDraft {
-  const data: Partial<DemoPatient> = { ...draft.data };
+  const parsed = parseAdmissionCommand(command);
+  const data = mergeParsedIntoPatientData(draft.data, parsed);
   let allergiesCaptured = draft.allergiesCaptured;
   let medicationsCaptured = draft.medicationsCaptured;
   let contextualAnswered = draft.contextualAnswered;
 
-  const concernRoom = parseChiefConcernAndRoom(command);
-  if (concernRoom.chiefConcern) data.chiefConcern = concernRoom.chiefConcern;
-  if (concernRoom.room) data.room = concernRoom.room;
-  if (!data.name?.trim() && draft.step === "chief_concern") {
-    const stripped = command
-      .replace(/\b(?:room|in)\s+[A-Za-z0-9-]+\b/i, "")
-      .replace(/[?.!]+$/, "")
-      .trim();
-    if (stripped && !data.chiefConcern) {
-      data.name = stripped.split(",")[0]?.trim() ?? stripped;
-    }
-  }
-
-  const ageSex = parseAgeSex(command);
-  if (ageSex.age !== undefined) data.age = ageSex.age;
-  if (ageSex.sex) data.sex = ageSex.sex;
-
-  const allergies = parseAllergiesAnswer(command);
-  if (allergies !== null) {
-    data.allergies = allergies;
-    allergiesCaptured = true;
-  }
-
-  const medications = parseMedicationsAnswer(command);
-  if (medications !== null) {
-    data.medications = medications;
+  if (parsed.medication) {
     medicationsCaptured = true;
   }
 
-  if (draft.step === "contextual" || contextualAnswered) {
+  if (draft.step === "allergies") {
+    if (parsed.allergies !== undefined) {
+      data.allergies = parsed.allergies;
+      allergiesCaptured = true;
+    } else {
+      const allergies = parseAllergiesAnswer(command);
+      if (allergies !== null) {
+        data.allergies = allergies;
+        allergiesCaptured = true;
+      }
+    }
+  } else if (parsed.allergies !== undefined && isExplicitAllergyAnswer(command)) {
+    data.allergies = parsed.allergies;
+    allergiesCaptured = true;
+  }
+
+  if (draft.step === "medications" && !parsed.medication) {
+    const medications = parseMedicationsAnswer(command);
+    if (medications !== null) {
+      data.medications = medications;
+      medicationsCaptured = true;
+    }
+  }
+
+  if (draft.step === "contextual") {
     const contact = parseEmergencyContactAnswer(command);
-    if (contact) data.emergencyContact = contact;
-    if (draft.step === "contextual" && command.trim()) {
+    if (contact) {
+      data.emergencyContact = contact;
+      contextualAnswered = true;
+    } else if (
+      command.trim() &&
+      /^(yes|no|none|not at this time|that's all|that is all)\b/i.test(command.trim())
+    ) {
       contextualAnswered = true;
     }
   }
@@ -1341,14 +1290,14 @@ function mergeAdmissionAnswer(draft: AdmissionDraft, command: string): Admission
 function buildAdmissionPayload(data: Partial<DemoPatient>): Record<string, unknown> {
   return {
     name: data.name?.trim(),
-    room: data.room?.trim() || "Unassigned",
-    chiefConcern: data.chiefConcern?.trim() || "Not specified",
+    room: data.room?.trim(),
+    chiefConcern: data.chiefConcern?.trim(),
     age: typeof data.age === "number" && Number.isFinite(data.age) ? data.age : 0,
     sex: data.sex?.trim() || "Unknown",
     allergies: data.allergies ?? [],
     medications: data.medications ?? [],
     triageAcuity: data.triageAcuity?.trim() || "CTAS 3",
-    emergencyContact: data.emergencyContact,
+    ...(data.emergencyContact ? { emergencyContact: data.emergencyContact } : {}),
     lastVisit: new Date().toISOString().slice(0, 10),
   };
 }
@@ -2955,12 +2904,9 @@ export default function VitalOsClient() {
         draft: AdmissionDraft,
         early: boolean
       ) => {
-        if (!draft.data.name?.trim()) {
-          pushLocalAssistantResponse(
-            command,
-            "Please provide the patient name before admitting."
-          );
-          setAdmissionConversation(EMPTY_ADMISSION);
+        if (!hasRequiredAdmissionFields(draft.data)) {
+          setAdmissionConversation(draft);
+          pushLocalAssistantResponse(command, admissionPromptForStep(draft));
           return;
         }
         const res = await fetch("/api/patients", {
@@ -3704,8 +3650,18 @@ export default function VitalOsClient() {
     resetSession();
     setMicMuted(false);
     setSystemState("idle");
+  }, [disposeRecognition, resetSession]);
+
+  const handleSignOut = React.useCallback(() => {
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm("Are you sure you want to sign out?")
+    ) {
+      return;
+    }
+    endVoiceSession();
     logout();
-  }, [disposeRecognition, resetSession, logout]);
+  }, [endVoiceSession, logout]);
 
   const toggleMicMute = React.useCallback(() => {
     if (!voiceSessionLive) {
@@ -4022,7 +3978,7 @@ export default function VitalOsClient() {
           <div className="mt-auto flex flex-col gap-2 pt-4">
             <button
               type="button"
-              onClick={endVoiceSession}
+              onClick={handleSignOut}
               className="flex h-12 w-full flex-col items-center justify-center gap-1 rounded-xl px-2 text-center text-[11px] font-medium text-blue-100/85 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
               title="Sign out and return to role selection"
             >
@@ -4803,7 +4759,7 @@ export default function VitalOsClient() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => logout()}
+                        onClick={handleSignOut}
                         className="rounded-lg border border-slate-300 px-3 py-1.5"
                       >
                         Sign Out
