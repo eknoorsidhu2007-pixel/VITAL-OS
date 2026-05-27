@@ -723,29 +723,36 @@ function PatientClinicalIndicator({
 }
 
 type AdmissionStep =
-  | "chief_concern"
-  | "age_sex"
-  | "allergies"
+  | "name"
+  | "confirmName"
+  | "spellNameCorrection"
+  | "ageSex"
+  | "chiefConcern"
+  | "room"
   | "medications"
-  | "contextual"
+  | "confirmation"
   | "done";
 
 type AdmissionDraft = {
   active: boolean;
   data: Partial<DemoPatient>;
-  step: AdmissionStep;
-  allergiesCaptured: boolean;
+  currentStep: AdmissionStep;
+  lastQuestionAsked?: string;
+  missingFields: string[];
+  nameConfirmed: boolean;
   medicationsCaptured: boolean;
-  contextualAnswered: boolean;
+  nameSpellParseError?: boolean;
+  awaitingCorrectionField?: boolean;
 };
 
 const EMPTY_ADMISSION: AdmissionDraft = {
   active: false,
   data: {},
-  step: "chief_concern",
-  allergiesCaptured: false,
+  currentStep: "name",
+  nameConfirmed: false,
   medicationsCaptured: false,
-  contextualAnswered: false,
+  missingFields: [],
+  lastQuestionAsked: "",
 };
 
 type EditableProblem = {
@@ -1093,6 +1100,186 @@ function normalizeMedicationSig(sig: string): string {
     .replace(/\bthree times a day\b/i, "PO TID");
 }
 
+function spellName(name: string): string {
+  const cleaned = name.replace(/[^A-Za-z\s]/g, " ").trim();
+  if (!cleaned) return "";
+  return cleaned
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.toUpperCase().split("").join("-"))
+    .join(" ");
+}
+
+function lettersToSpelledWord(letters: string[]): string {
+  if (!letters.length) return "";
+  const upper = letters[0].toUpperCase();
+  const rest = letters.slice(1).join("").toLowerCase();
+  return upper + rest;
+}
+
+function splitSpelledLettersIntoName(
+  letters: string[],
+  previousName?: string
+): string {
+  if (!letters.length) return "";
+  if (letters.length === 1) return lettersToSpelledWord(letters);
+
+  const prevParts = previousName
+    ?.trim()
+    .split(/\s+/)
+    .map((w) => w.replace(/[^A-Za-z]/g, ""))
+    .filter(Boolean);
+  if (prevParts && prevParts.length >= 2) {
+    const firstLen = prevParts[0].length;
+    const lastLen = prevParts[prevParts.length - 1].length;
+    if (firstLen > 0 && lastLen > 0 && firstLen + lastLen === letters.length) {
+      return [
+        lettersToSpelledWord(letters.slice(0, firstLen)),
+        lettersToSpelledWord(letters.slice(firstLen)),
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+  }
+
+  if (letters.length >= 6) {
+    const half = Math.floor(letters.length / 2);
+    return [lettersToSpelledWord(letters.slice(0, half)), lettersToSpelledWord(letters.slice(half))]
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  return lettersToSpelledWord(letters);
+}
+
+function parseSpelledName(input: string, previousName?: string): string | undefined {
+  let text = input.trim();
+  if (!text) return undefined;
+
+  const titleCaseWord = (w: string): string =>
+    w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+
+  text = text
+    .replace(/[.,!?]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  text = text
+    .replace(/\bfirst name\b/gi, "<FIRST>")
+    .replace(/\blast name\b/gi, "<LAST>");
+
+  text = text.replace(
+    /\b(spell(?:ing)?(?:\s+it)?|name is|it is|the name is|patient is)\b/gi,
+    " "
+  );
+  text = text.replace(/\b([A-Za-z])\s+as\s+in\s+[A-Za-z]+\b/gi, "$1");
+  text = text.replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+
+  const letterFromToken = (tok: string): string | null => {
+    const c = tok.replace(/[^A-Za-z]/g, "");
+    return c.length === 1 ? c.toUpperCase() : null;
+  };
+
+  const lettersFromHyphenToken = (tok: string): string[] | null => {
+    const parts = tok.split("-").filter(Boolean);
+    if (parts.length > 1 && parts.every((p) => letterFromToken(p))) {
+      return parts.map((p) => letterFromToken(p)!);
+    }
+    return null;
+  };
+
+  const parseSegmentToWord = (segTokens: string[]): string => {
+    const letters: string[] = [];
+    for (const tok of segTokens) {
+      const hyphenLetters = lettersFromHyphenToken(tok);
+      if (hyphenLetters) {
+        letters.push(...hyphenLetters);
+        continue;
+      }
+      const letter = letterFromToken(tok);
+      if (letter) {
+        letters.push(letter);
+        continue;
+      }
+      const cleaned = tok.replace(/[^A-Za-z]/g, "");
+      if (cleaned.length > 1) {
+        return titleCaseWord(cleaned);
+      }
+    }
+    return lettersToSpelledWord(letters);
+  };
+
+  const tokens = text.split(" ").filter(Boolean);
+  const firstIdx = tokens.indexOf("<FIRST>");
+  const lastIdx = tokens.indexOf("<LAST>");
+  if (firstIdx !== -1 && lastIdx !== -1 && firstIdx < lastIdx) {
+    const first = parseSegmentToWord(tokens.slice(firstIdx + 1, lastIdx));
+    const last = parseSegmentToWord(tokens.slice(lastIdx + 1));
+    const full = [first, last].filter(Boolean).join(" ").trim();
+    return full || undefined;
+  }
+
+  const words: string[] = [];
+  let letterBuf: string[] = [];
+
+  const flushLetterBuf = () => {
+    if (!letterBuf.length) return;
+    words.push(lettersToSpelledWord(letterBuf));
+    letterBuf = [];
+  };
+
+  for (const tok of tokens) {
+    const hyphenLetters = lettersFromHyphenToken(tok);
+    if (hyphenLetters) {
+      flushLetterBuf();
+      words.push(lettersToSpelledWord(hyphenLetters));
+      continue;
+    }
+    const letter = letterFromToken(tok);
+    if (letter) {
+      letterBuf.push(letter);
+      continue;
+    }
+    const cleaned = tok.replace(/[^A-Za-z]/g, "");
+    if (cleaned.length > 1) {
+      flushLetterBuf();
+      words.push(titleCaseWord(cleaned));
+    }
+  }
+  flushLetterBuf();
+
+  if (words.length === 1 && words[0].length > 1) {
+    return words[0];
+  }
+
+  if (words.length >= 2 && words.every((w) => w.length > 1)) {
+    return words.join(" ").trim();
+  }
+
+  if (words.every((w) => w.length === 1)) {
+    const letters = words.map((w) => w.toUpperCase());
+    const full = splitSpelledLettersIntoName(letters, previousName);
+    return full || undefined;
+  }
+
+  const allLetters: string[] = [];
+  for (const tok of tokens) {
+    const hyphenLetters = lettersFromHyphenToken(tok);
+    if (hyphenLetters) {
+      allLetters.push(...hyphenLetters);
+      continue;
+    }
+    const letter = letterFromToken(tok);
+    if (letter) allLetters.push(letter);
+  }
+  if (allLetters.length >= 2) {
+    return splitSpelledLettersIntoName(allLetters, previousName) || undefined;
+  }
+
+  return words.join(" ").trim() || undefined;
+}
+
 function parseAllergiesAnswer(text: string): string[] | null {
   const q = text.trim();
   if (!q) return null;
@@ -1168,122 +1355,796 @@ function parseEmergencyContactAnswer(
   };
 }
 
-function parseAdmissionBootstrap(command: string): Partial<DemoPatient> {
-  return mergeParsedIntoPatientData({}, parseAdmissionCommand(command));
+function cleanVoiceCommand(input: string): string {
+  let t = input.trim();
+  if (!t) return "";
+
+  // Wake words / common openings (beginning only).
+  t = t.replace(
+    /^(?:hey\s+vital[s]?\s*,?\s*|vital\s*,?\s*|okay\s+vital[s]?\s*,?\s*|ok\s+vital[s]?\s*,?\s*|hey\s+vitals\s*,?\s*|hey\s+vido\s*,?\s*|hey\s+final[s]?\s*,?\s*|vital[s]?\s*,?\s*|can you\s+|could you\s+|please\s+|i need you to\s+|i'd like to\s+|i would like to\s+|let's\s+)/i,
+    ""
+  );
+
+  // Collapse repeated spaces.
+  t = t.replace(/\s+/g, " ").trim();
+  return t;
 }
 
-function isSeriousAdmissionCase(data: Partial<DemoPatient>): boolean {
-  const concern = (data.chiefConcern ?? "").toLowerCase();
-  const acuity = (data.triageAcuity ?? "").toLowerCase();
-  return (
-    /\b(ctas\s*[12]|critical|severe|unresponsive|stemi|stroke|chest pain|shortness of breath|sepsis|abdominal pain)\b/i.test(
-      concern
-    ) || /\bctas\s*[12]\b/.test(acuity)
+function isAffirmative(input: string): boolean {
+  return /^(?:yes|yeah|yep|correct|that's correct|that is correct|right|confirmed)\b/i.test(
+    input.trim()
   );
 }
 
-function resolveAdmissionStep(draft: AdmissionDraft): AdmissionStep {
-  const data = draft.data;
-  if (!hasRequiredAdmissionFields(data)) return "chief_concern";
-  if (data.age === undefined || !data.sex?.trim()) return "age_sex";
-  if (!draft.allergiesCaptured) return "allergies";
-  if (!draft.medicationsCaptured && !(data.medications?.length ?? 0)) {
-    return "medications";
-  }
-  if (!draft.contextualAnswered) return "contextual";
-  return "done";
+function isNegative(input: string): boolean {
+  return /^(?:no|nope|incorrect|wrong|not correct|that's wrong|that is wrong)\b/i.test(
+    input.trim()
+  );
 }
 
-function admissionPromptForStep(draft: AdmissionDraft): string {
-  const firstName = admissionFirstName(draft.data);
-  switch (draft.step) {
-    case "chief_concern":
-      if (!draft.data.name?.trim()) {
-        const notedMed = draft.data.medications?.[0]?.name;
-        if (notedMed) {
-          return `I noted ${notedMed}. Who is the patient you want to admit?`;
+function isSkipLike(input: string): boolean {
+  return /^(?:unknown|skip|not sure|n\/a|na|don't know|do not know)\b/i.test(
+    input.trim()
+  );
+}
+
+function titleCaseNameWord(word: string): string {
+  if (!word) return "";
+  // Very small helper; we keep internal apostrophes/hyphens and titlecase the full word.
+  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+}
+
+const GENERIC_ADMISSION_INTENT_PHRASES = new Set([
+  "patient",
+  "a patient",
+  "new patient",
+  "the patient",
+  "admit patient",
+  "admit a patient",
+  "admit new patient",
+  "admit the patient",
+  "i'd like to admit a patient",
+  "i would like to admit a patient",
+  "i want to admit a patient",
+  "can you admit a patient",
+  "please admit a patient",
+  "create a patient",
+  "create new patient",
+  "create a new patient",
+  "add a patient",
+  "add new patient",
+  "add a new patient",
+]);
+
+function normalizeAdmissionIntentKey(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[.,!?;:]+/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function isGenericAdmissionIntentOnly(text: string): boolean {
+  const key = normalizeAdmissionIntentKey(text);
+  if (!key) return true;
+  if (GENERIC_ADMISSION_INTENT_PHRASES.has(key)) return true;
+  return false;
+}
+
+function stripAdmissionIntentPhrases(text: string): string {
+  let t = text.trim();
+  const intentPrefix =
+    /^(?:i(?:'d| would| want to)\s+(?:like to\s+)?|can you\s+|could you\s+|please\s+|let's\s+)?(?:admit|add|create)(?:\s+a)?(?:\s+new)?(?:\s+patient)?\b/i;
+  while (intentPrefix.test(t)) {
+    t = t.replace(intentPrefix, "").trim();
+  }
+  t = t.replace(/^(?:admit|add|create)(?:\s+a)?(?:\s+new)?(?:\s+patient)?\b/i, "").trim();
+  return t.replace(/\s+/g, " ").trim();
+}
+
+function isInvalidGenericPatientName(candidate: string): boolean {
+  const key = normalizeAdmissionIntentKey(candidate);
+  if (!key) return true;
+  if (GENERIC_ADMISSION_INTENT_PHRASES.has(key)) return true;
+  if (/^(?:a|an|the|new)\s+patient$/i.test(key)) return true;
+  if (key === "patient" || key === "admit" || key === "create" || key === "add") return true;
+  const words = key.split(/\s+/).filter(Boolean);
+  if (words.length === 1 && words[0] === "patient") return true;
+  if (words.every((w) => ["a", "an", "the", "new", "patient", "admit", "add", "create"].includes(w))) {
+    return true;
+  }
+  return false;
+}
+
+function parsePatientName(input: string): string | undefined {
+  const q0 = cleanVoiceCommand(input);
+  const q = q0
+    .replace(/[.,!?]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!q) return undefined;
+  if (isGenericAdmissionIntentOnly(q)) return undefined;
+
+  if (isNegative(q) || isAffirmative(q) || isSkipLike(q)) return undefined;
+
+  // Pull candidate after explicit name cues.
+  const explicit =
+    q.match(
+      /\b(?:patient\s+is|name\s+is|called|named)\s+([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,3})/i
+    )?.[1] ?? undefined;
+
+  let candidate = explicit;
+  if (!candidate) {
+    // Name immediately after "admit patient" / "admit a patient" (must not be generic).
+    const afterAdmitPatient = q.match(
+      /\b(?:admit|add|create)(?:\s+a)?(?:\s+new)?\s+patient\s+(?!named|called|name\s+is)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,3})/i
+    )?.[1];
+    if (afterAdmitPatient) {
+      const stopRx =
+        /\b(?:\d{1,3}\s*(?:year[s]?\s*old|yo)?\s*(?:male|female)?|male|female|room|bed|bay|acuity|chief\s+concern|allergies?|medications?|needs?|give|start|order|emergency\s*contact)\b/i;
+      candidate = afterAdmitPatient.split(stopRx)[0]?.trim();
+    }
+  }
+
+  // Allow direct name responses (e.g. "Vithu Patel") during the name step.
+  if (!candidate) {
+    const stripped = stripAdmissionIntentPhrases(q);
+    if (stripped && !isGenericAdmissionIntentOnly(stripped)) {
+      candidate = stripped.split(",")[0]?.trim();
+    }
+  }
+
+  if (!candidate || isInvalidGenericPatientName(candidate)) return undefined;
+  candidate = candidate.replace(/^[,:]\s*/g, "").replace(/[^A-Za-z\s'-]/g, " ").trim();
+  candidate = candidate.replace(/\s+/g, " ");
+
+  const words = candidate.split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 4) return undefined;
+  if (words.some((w) => !/^[A-Za-z][A-Za-z'-]*$/.test(w))) return undefined;
+  if (words.every((w) => w.length < 2)) return undefined;
+  if (isInvalidGenericPatientName(words.join(" "))) return undefined;
+
+  const lowered = candidate.toLowerCase();
+  if (
+    /\b(?:aspirin|ibuprofen|tylenol|advil|acetaminophen|penicillin|amoxicillin|codeine|allerg(?:y|ies)|nkda|nk?a|nka|room|bed|bay|acuity|chief|concern|broken|limb|chest|pain|shortness|breath|abdominal|migraine|fever|vomiting|fall)\b/i.test(
+      lowered
+    )
+  ) {
+    return undefined;
+  }
+
+  return words.map(titleCaseNameWord).join(" ");
+}
+
+function parseAgeSex(input: string): { age?: number; sex?: "M" | "F" | "U" } {
+  const q = cleanVoiceCommand(input).trim();
+  const low = q.toLowerCase();
+
+  if (!q) return {};
+  if (isSkipLike(q) || isNegative(q) || isAffirmative(q)) return {};
+  if (
+    /\b(chest pain|broken limb|room|aspirin|ibuprofen|tylenol|advil)\b/i.test(low)
+  ) {
+    return {};
+  }
+
+  const out: { age?: number; sex?: "M" | "F" | "U" } = {};
+
+  const compact = q.match(/\b(\d{1,3})\s*([mf])\b/i);
+  if (compact?.[1] && compact[2]) {
+    out.age = Number(compact[1]);
+    out.sex = compact[2].toUpperCase() === "M" ? "M" : "F";
+    return out;
+  }
+
+  const agePatterns = [
+    /\b(?:age|aged)\s*(\d{1,3})\b/i,
+    /\b(\d{1,3})\s*[- ]?\s*year[s]?\s*[- ]?\s*old\b/i,
+    /\b(\d{1,3})\s*[- ]?\s*year[s]?\s*[- ]?\s*old\s*(male|female|man|woman|boy|girl)\b/i,
+    /\b(\d{1,3})\s*(?:yo|y\.?o\.?)\b/i,
+    /\b(\d{1,3})\s*(male|female|man|woman|boy|girl)\b/i,
+    /\b(male|female|man|woman|boy|girl)\s+age\s+(\d{1,3})\b/i,
+    /\b(\d{1,3})\b/,
+  ];
+  for (const rx of agePatterns) {
+    const match = q.match(rx);
+    if (match?.[1]) {
+      const age = Number(match[1]);
+      if (age >= 0 && age <= 130) out.age = age;
+      const sexWord = match[2];
+      if (sexWord) {
+        const tok = sexWord.toLowerCase();
+        if (tok === "m" || tok === "male" || tok === "man" || tok === "boy") out.sex = "M";
+        else if (tok === "f" || tok === "female" || tok === "woman" || tok === "girl") {
+          out.sex = "F";
         }
-        return "Who is the patient you want to admit?";
       }
-      if (!draft.data.room?.trim()) {
-        return `What room should ${firstName} be assigned to?`;
+      break;
+    }
+  }
+
+  if (!out.sex) {
+    const sexToken =
+      q.match(/\b(male|man|boy)\b/i)?.[1] ||
+      q.match(/\b(female|woman|girl)\b/i)?.[1] ||
+      q.match(/\b([mf])\b/i)?.[1];
+    if (sexToken) {
+      const tok = sexToken.toLowerCase();
+      if (tok === "m" || tok === "male" || tok === "man" || tok === "boy") out.sex = "M";
+      else if (tok === "f" || tok === "female" || tok === "woman" || tok === "girl") {
+        out.sex = "F";
       }
-      if (!draft.data.chiefConcern?.trim()) {
-        return `What is ${firstName}'s chief concern?`;
+    }
+  }
+
+  if (out.age === undefined || !out.sex) return {};
+  return out;
+}
+
+function parseRoom(input: string): string | undefined {
+  const q = cleanVoiceCommand(input).trim();
+  if (!q) return undefined;
+  if (isNegative(q) || isAffirmative(q) || isSkipLike(q)) return undefined;
+
+  const low = q.toLowerCase();
+  if (/\b(chest pain|shortness of breath|broken limb|fever|vomiting|migraine|abdominal pain)\b/i.test(low)) {
+    return undefined;
+  }
+
+  const patterns: Array<{ rx: RegExp; prefix: string }> = [
+    { rx: /\b(?:room)\s+(\d+[A-Za-z]?)\b/i, prefix: "Room" },
+    { rx: /\b(?:bed)\s+(\d+[A-Za-z]?)\b/i, prefix: "Bed" },
+    { rx: /\b(?:bay)\s+(\d+[A-Za-z]?)\b/i, prefix: "Bay" },
+    { rx: /\b(?:isolation)\s+(\d+[A-Za-z]?)\b/i, prefix: "Isolation" },
+    { rx: /\b(?:peds)\s+(\d+[A-Za-z]?)\b/i, prefix: "Peds" },
+    { rx: /\b(?:trauma)\s+(\d+[A-Za-z]?)\b/i, prefix: "Trauma" },
+  ];
+  for (const { rx, prefix } of patterns) {
+    const m = q.match(rx);
+    const unit = m?.[1];
+    if (unit) return `${prefix} ${unit.toUpperCase()}`;
+  }
+
+  const bare = q.match(/^(\d+[A-Za-z]?)$/);
+  if (bare?.[1]) return `Room ${bare[1].toUpperCase()}`;
+
+  return undefined;
+}
+
+function isInvalidChiefConcernInput(q: string): boolean {
+  const low = q.toLowerCase().trim();
+  if (!low) return true;
+  if (isNegative(q) || isAffirmative(q) || isSkipLike(q)) return true;
+  if (low === "no" || low === "none" || low === "unknown" || low === "skip") return true;
+  if (low === "chief concern" || low === "chief" || low === "concern") return true;
+  if (parseRoom(q)) return true;
+  if (parseAgeSex(q).age !== undefined && parseAgeSex(q).sex) return true;
+  if (/\b(?:\d{1,3}\s*(?:year[s]?\s*old|yo)?\s*)?(?:male|female|man|woman|boy|girl)\b/i.test(low)) {
+    return true;
+  }
+  if (parsePatientName(q)) return true;
+  const looksMedication =
+    /\b(needs?|give|start|order|prescribe|medication|meds?)\b/i.test(q) &&
+    /\b(aspirin|ibuprofen|tylenol|advil|acetaminophen|metformin|salbutamol|amoxicillin|penicillin|codeine)\b/i.test(
+      q
+    );
+  if (looksMedication) return true;
+  if (/^(?:aspirin|ibuprofen|tylenol|advil|acetaminophen)\b/i.test(low)) return true;
+  if (/\b(?:he|she|they)\s+needs?\s+/i.test(low)) return true;
+  return false;
+}
+
+function parseChiefConcern(
+  input: string,
+  options?: { directAnswer?: boolean }
+): string | undefined {
+  const q0 = cleanVoiceCommand(input).trim();
+  const q = q0.replace(/[?.!,;:]+$/g, "").trim();
+  if (!q || isInvalidChiefConcernInput(q)) return undefined;
+
+  const hasExplicitCue =
+    /\bchief\s+concern\b/i.test(q) ||
+    /\bconcern\s+is\b/i.test(q) ||
+    /\bpresenting\s+with\b/i.test(q) ||
+    /\bcomplaining\s+of\b/i.test(q) ||
+    /\bcame\s+in\s+for\b/i.test(q);
+
+  if (!options?.directAnswer && !hasExplicitCue) {
+    return undefined;
+  }
+
+  let concern = q;
+  if (hasExplicitCue) {
+    const extractRx =
+      /\b(?:chief\s+concern(?:\s+is)?|concern\s+is|presenting\s+with|complaining\s+of|came\s+in\s+for)\b\s+(.+)/i;
+    const m = q.match(extractRx);
+    if (m?.[1]) concern = m[1].trim();
+  } else if (options?.directAnswer) {
+    if (/^\s*for\s+/i.test(q)) {
+      concern = q.replace(/^\s*for\s+/i, "").trim();
+    } else if (/^\s*with\s+/i.test(q)) {
+      concern = q.replace(/^\s*with\s+/i, "").trim();
+    } else {
+      concern = q;
+    }
+  }
+
+  const stopRx =
+    /\b(?:needs?|give|start|order|medications?|room|bed|bay|\d{1,3}\s*(?:year|yo|male|female)|male|female)\b/i;
+  concern = concern.split(stopRx)[0]?.trim() ?? concern;
+  if (concern.length < 2 || concern.toLowerCase() === "chief concern") return undefined;
+  if (isInvalidChiefConcernInput(concern)) return undefined;
+
+  concern = concern.replace(/\s+/g, " ");
+  return concern.charAt(0).toUpperCase() + concern.slice(1);
+}
+
+function parseChiefConcernFromBootstrap(command: string): string | undefined {
+  const cleaned = cleanVoiceCommand(command);
+  const hasCue =
+    /\bchief\s+concern\b/i.test(cleaned) ||
+    /\bconcern\s+is\b/i.test(cleaned) ||
+    /\bpresenting\s+with\b/i.test(cleaned) ||
+    /\bcomplaining\s+of\b/i.test(cleaned) ||
+    /\bcame\s+in\s+for\b/i.test(cleaned);
+  if (!hasCue) return undefined;
+  return parseChiefConcern(cleaned, { directAnswer: true });
+}
+
+function normalizeMedicationName(name: string): string {
+  const cleaned = name.trim().replace(/[^A-Za-z0-9/+-]/g, " ").replace(/\s+/g, " ");
+  if (!cleaned) return "";
+  return cleaned
+    .split(/\s+/)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ")
+    .replace(/\s+/g, " ");
+}
+
+function parseMedication(input: string): DemoMedication[] {
+  const q = cleanVoiceCommand(input).trim();
+  if (!q) return [];
+  const low = q.toLowerCase();
+
+  // Hard negation for meds.
+  const isMedsDenial =
+    /^(?:no|none|no meds?|no medications?)\b/i.test(q) ||
+    /\bnot\s+(?:on\s+any|taking\s+any)\b/i.test(q) ||
+    /\bno\s+current\s+medications?\b/i.test(q);
+  if (isMedsDenial) return [];
+
+  // If it doesn't look like medication text, don't accidentally fill the field.
+  const looksLikeMeds =
+    /\b(needs?|give|start|order|prescribe|medication|meds?|aspirin|ibuprofen|tylenol|advil|acetaminophen|codeine|penicillin|amoxicillin)\b/i.test(
+      low
+    ) ||
+    /\b(\d+(?:\.\d+)?\s*(?:mg|mcg|g|units?))\b/i.test(low);
+  if (!looksLikeMeds) return [];
+
+  let normalized = q
+    .replace(/\baspers\b/gi, "aspirin")
+    .replace(/\basprin\b/gi, "aspirin")
+    .replace(/\basperin\b/gi, "aspirin")
+    .replace(/\btylanol\b/gi, "tylenol")
+    .replace(/\btyl?enol\b/gi, "tylenol")
+    .replace(/\badvil\b/gi, "Advil")
+    .replace(/\bibuprofen\b/gi, "Ibuprofen")
+    .replace(/\bacetaminophen\b/gi, "Acetaminophen");
+
+  normalized = normalized.replace(/\b(?:needs?|give|start|order|prescribe|medication|meds?)\b/gi, "");
+  normalized = normalized.replace(/\s+/g, " ").trim();
+
+  const parts = normalized
+    .split(/\s*,\s*|\s+and\s+/i)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const out: DemoMedication[] = [];
+  for (const part of parts) {
+    if (!part) continue;
+    const doseMatch = part.match(/^(.+?)\s+(.*)$/);
+    if (doseMatch?.[1] && doseMatch?.[2]) {
+      const name = normalizeMedicationName(doseMatch[1]);
+      const sig = normalizeMedicationSig(doseMatch[2]);
+      if (name) out.push({ name, sig: sig || "As directed" });
+    } else {
+      const name = normalizeMedicationName(part);
+      if (name) out.push({ name, sig: "As directed" });
+    }
+  }
+  return out.length ? out : [];
+}
+
+function parseAllergies(input: string): string[] {
+  const q = cleanVoiceCommand(input).trim();
+  if (!q) return [];
+  const low = q.toLowerCase();
+
+  if (
+    /^(?:no|none)\b/i.test(q) ||
+    /^(?:no allergies|no known allergies|nkda|nka|none known)\b/i.test(q) ||
+    /\bno known drug allergies\b/i.test(q)
+  ) {
+    return [];
+  }
+
+  // If it's clearly complaint text (chief concern), don't save it as allergy.
+  if (
+    /\b(broken limb|chest pain|shortness of breath|fever|vomiting|migraine|abdominal pain|dizziness)\b/i.test(
+      low
+    )
+  ) {
+    return [];
+  }
+
+  // If the utterance looks like a medication request/order, do not store it as an allergy.
+  const looksLikeMedication =
+    /\b(needs?|give|start|order|prescribe|medication|meds?)\b/i.test(q) ||
+    /\b(\d+(?:\.\d+)?\s*(?:mg|mcg|g|units?))\b/i.test(q) ||
+    /\b(aspirin|ibuprofen|tylenol|advil|acetaminophen|codeine|penicillin|amoxicillin)\b/i.test(
+      low
+    );
+  if (looksLikeMedication && !/\ballergic to\b/i.test(low)) {
+    return [];
+  }
+
+  const extractRx = /\b(?:allergic to|allergy to|allergies are)\s+(.+)$/i;
+  const m = q.match(extractRx);
+  const body = (m?.[1] ?? q).trim();
+  const allergyText = body.replace(/[?.!,;:]+$/g, "").trim();
+  if (!allergyText) return [];
+
+  return allergyText
+    .split(/\s*,\s*|\s+and\s+/i)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function parseAcuity(input: string): string | undefined {
+  const q = cleanVoiceCommand(input).trim();
+  if (!q) return undefined;
+  const low = q.toLowerCase();
+
+  if (isSkipLike(q) || /^(?:unknown|skip)\b/i.test(q)) return "CTAS 3";
+  if (/^(?:no|none|nope)\b/i.test(q)) return undefined;
+
+  const explicit = low.match(/\b(?:ctas|acuity|urgency|level|priority)\s*([1-5])\b/);
+  if (explicit?.[1]) return `CTAS ${explicit[1]}`;
+  if (/\bcritical\b/.test(low)) return "CTAS 1";
+  if (/\b(?:emergent|emergency)\b/.test(low)) return "CTAS 2";
+  if (/\burgent\b/.test(low)) return "CTAS 3";
+  if (/\bnon[-\s]?urgent\b/.test(low)) return "CTAS 5";
+  return undefined;
+}
+
+function parseEmergencyContact(input: string): DemoPatient["emergencyContact"] | undefined {
+  const q = cleanVoiceCommand(input).trim();
+  if (!q) return undefined;
+
+  if (isNegative(q) || isSkipLike(q) || /^(?:none|not at this time)\b/i.test(q)) {
+    return undefined;
+  }
+
+  const phoneMatch = q.match(/\b(\d{3}[-.\s]?\d{3}[-.\s]?\d{4})\b/);
+  const relationshipMatch = q.match(
+    /\b(spouse|partner|parent|mother|father|sibling|child|friend)\b/i
+  );
+
+  // Remove phone and relationship tokens to get the name-ish remaining.
+  const namePart = q
+    .replace(phoneMatch?.[0] ?? "", "")
+    .replace(relationshipMatch?.[0] ?? "", "")
+    .replace(/\b(?:emergency\s*contact\s+is|contact\s+is|primary\s*contact\s+is|phone\s+number\s+is|emergency\s*contact|contact|is|the)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!namePart && !phoneMatch) return undefined;
+  return {
+    name: namePart || "Not listed",
+    relationship: relationshipMatch?.[1] ?? "Contact",
+    phone: phoneMatch?.[1] ?? "Not listed",
+  };
+}
+
+function computeMissingFields(draft: AdmissionDraft): string[] {
+  const missing: string[] = [];
+  const d = draft.data;
+
+  if (!d.name?.trim()) missing.push("name");
+  if (!draft.nameConfirmed) missing.push("nameConfirmed");
+  if (typeof d.age !== "number" || !Number.isFinite(d.age)) missing.push("age");
+  if (!d.sex?.trim() || !["M", "F", "U"].includes(d.sex)) missing.push("sex");
+  if (!d.room?.trim()) missing.push("room");
+  if (!d.chiefConcern?.trim()) missing.push("chiefConcern");
+  return missing;
+}
+
+function formatMedicationSummary(medications: DemoMedication[] | undefined): string {
+  if (!medications?.length) return "none";
+  return medications.map((m) => m.name).join(", ");
+}
+
+function getNextAdmissionStep(draft: AdmissionDraft): AdmissionStep {
+  const d = draft.data;
+
+  if (!d.name?.trim()) return "name";
+  if (!draft.nameConfirmed) return "confirmName";
+
+  if (
+    typeof d.age !== "number" ||
+    !Number.isFinite(d.age) ||
+    !d.sex?.trim() ||
+    !["M", "F", "U"].includes(d.sex)
+  ) {
+    return "ageSex";
+  }
+
+  if (!d.chiefConcern?.trim()) return "chiefConcern";
+  if (!d.room?.trim()) return "room";
+  if (!draft.medicationsCaptured) return "medications";
+
+  return "confirmation";
+}
+
+const CORRECTION_FIELD_PROMPT =
+  "Which field should I correct: name, age and sex, chief concern, room, or medications?";
+
+function parseCorrectionFieldChoice(input: string): AdmissionStep | null {
+  const low = input.toLowerCase();
+  if (/\b(name|patient\s+name)\b/.test(low)) return "name";
+  if (/\b(age|sex|age\s+and\s+sex)\b/.test(low)) return "ageSex";
+  if (/\b(chief\s+concern|concern)\b/.test(low)) return "chiefConcern";
+  if (/\broom\b/.test(low)) return "room";
+  if (/\b(medication|medications|meds?)\b/.test(low)) return "medications";
+  return null;
+}
+
+function getPromptForStep(step: AdmissionStep, draft: AdmissionDraft): string {
+  if (draft.awaitingCorrectionField) {
+    return CORRECTION_FIELD_PROMPT;
+  }
+
+  const name = draft.data.name?.trim() || "";
+  switch (step) {
+    case "name":
+      return "Who is the patient you want to admit?";
+    case "confirmName":
+      return `I heard the patient name as ${name}. Spelled ${spellName(name)}. Is that correct?`;
+    case "spellNameCorrection":
+      if (draft.nameSpellParseError) {
+        return "I could not understand the spelling. Please spell the patient’s first and last name slowly.";
       }
-      return `Got it. What's ${firstName}'s chief concern and what room are they in?`;
-    case "age_sex":
-      return `How old is ${firstName} and what's their sex?`;
-    case "allergies":
-      return "Any known allergies?";
+      return "Please spell the patient’s full name.";
+    case "ageSex":
+      return "What is the patient’s age and sex?";
+    case "chiefConcern":
+      return "What is the patient’s chief concern?";
+    case "room":
+      return "What room should the patient be assigned to?";
     case "medications":
-      return `Is ${firstName} on any medications?`;
-    case "contextual":
-      return isSeriousAdmissionCase(draft.data)
-        ? `Is there someone we should contact for ${firstName}?`
-        : `Do we need any medications or orders queued for ${firstName}?`;
+      return "Is the patient taking any medications or do they need any medication orders?";
+    case "confirmation": {
+      const age = typeof draft.data.age === "number" ? draft.data.age : 0;
+      const sex = draft.data.sex?.trim() || "U";
+      const room = draft.data.room?.trim() || "Unassigned";
+      const chief = draft.data.chiefConcern?.trim() || "";
+      const meds = formatMedicationSummary(draft.data.medications);
+      return `Confirm admission for ${name}: ${age}${sex}, ${room}, chief concern ${chief}, medications ${meds}. Should I create this patient?`;
+    }
+    case "done":
+      return "";
     default:
       return "";
   }
 }
 
-function mergeAdmissionAnswer(draft: AdmissionDraft, command: string): AdmissionDraft {
-  const parsed = parseAdmissionCommand(command);
-  const data = mergeParsedIntoPatientData(draft.data, parsed);
-  let allergiesCaptured = draft.allergiesCaptured;
-  let medicationsCaptured = draft.medicationsCaptured;
-  let contextualAnswered = draft.contextualAnswered;
+function admissionPromptForStep(draft: AdmissionDraft): string {
+  return getPromptForStep(draft.currentStep, draft);
+}
 
-  if (parsed.medication) {
-    medicationsCaptured = true;
+function parseAdmissionBootstrap(command: string): Partial<DemoPatient> {
+  const cleaned = cleanVoiceCommand(command);
+  const data: Partial<DemoPatient> = {};
+
+  const name = parsePatientName(cleaned);
+  if (name) data.name = name;
+
+  const ageSex = parseAgeSex(cleaned);
+  if (ageSex.age !== undefined) data.age = ageSex.age;
+  if (ageSex.sex) data.sex = ageSex.sex;
+
+  const concern = parseChiefConcernFromBootstrap(cleaned);
+  if (concern) data.chiefConcern = concern;
+
+  const room = parseRoom(cleaned);
+  if (room) data.room = room;
+
+  const medsMentioned =
+    /^(?:no|none)\b/i.test(cleaned) ||
+    /\bno\s+meds?\b/i.test(cleaned) ||
+    /\bno\s+medications?\b/i.test(cleaned) ||
+    /\bnot\s+(?:on\s+any|taking\s+any)\b/i.test(cleaned) ||
+    /\bno\s+current\s+medications?\b/i.test(cleaned) ||
+    /\b(needs?|give|start|order|prescribe|medication|meds?)\b/i.test(cleaned) ||
+    /\b(aspirin|ibuprofen|tylenol|advil|acetaminophen|codeine|metformin|salbutamol)\b/i.test(
+      cleaned
+    ) ||
+    /\b(\d+(?:\.\d+)?\s*(?:mg|mcg|g|units?))\b/i.test(cleaned);
+  if (medsMentioned) {
+    data.medications = parseMedication(cleaned);
   }
 
-  if (draft.step === "allergies") {
-    if (parsed.allergies !== undefined) {
-      data.allergies = parsed.allergies;
-      allergiesCaptured = true;
-    } else {
-      const allergies = parseAllergiesAnswer(command);
-      if (allergies !== null) {
-        data.allergies = allergies;
-        allergiesCaptured = true;
-      }
-    }
-  } else if (parsed.allergies !== undefined && isExplicitAllergyAnswer(command)) {
-    data.allergies = parsed.allergies;
-    allergiesCaptured = true;
-  }
+  return data;
+}
 
-  if (draft.step === "medications" && !parsed.medication) {
-    const medications = parseMedicationsAnswer(command);
-    if (medications !== null) {
-      data.medications = medications;
-      medicationsCaptured = true;
-    }
-  }
+/** Only skip the medications step when the utterance explicitly denies meds (one-shot). */
+function bootstrapExplicitMedicationsCaptured(cleaned: string): boolean {
+  return (
+    /\bno\s+medications?\b/i.test(cleaned) ||
+    /\bno\s+meds?\b/i.test(cleaned) ||
+    /\bnot\s+(?:on\s+any|taking\s+any)\b/i.test(cleaned) ||
+    /\bno\s+current\s+medications?\b/i.test(cleaned)
+  );
+}
 
-  if (draft.step === "contextual") {
-    const contact = parseEmergencyContactAnswer(command);
-    if (contact) {
-      data.emergencyContact = contact;
-      contextualAnswered = true;
-    } else if (
-      command.trim() &&
-      /^(yes|no|none|not at this time|that's all|that is all)\b/i.test(command.trim())
-    ) {
-      contextualAnswered = true;
-    }
-  }
-
-  const next: AdmissionDraft = {
-    active: true,
-    data,
-    step: "chief_concern",
-    allergiesCaptured,
-    medicationsCaptured,
-    contextualAnswered,
+function repromptAdmission(draft: AdmissionDraft): AdmissionDraft {
+  return {
+    ...draft,
+    lastQuestionAsked: admissionPromptForStep(draft),
+    missingFields: computeMissingFields(draft),
   };
-  next.step = resolveAdmissionStep(next);
+}
+
+function mergeAdmissionAnswer(draft: AdmissionDraft, command: string): AdmissionDraft {
+  const cleaned = cleanVoiceCommand(command);
+  const trimmed = cleaned.trim();
+
+  const data: Partial<DemoPatient> = { ...draft.data };
+  const next: AdmissionDraft = {
+    ...draft,
+    data,
+    nameSpellParseError: false,
+  };
+
+  if (draft.awaitingCorrectionField) {
+    const field = parseCorrectionFieldChoice(trimmed);
+    if (!field) {
+      return { ...next, awaitingCorrectionField: true, ...repromptAdmission(next) };
+    }
+    if (field === "name") {
+      next.nameConfirmed = false;
+      delete next.data.name;
+    }
+    if (field === "ageSex") {
+      delete next.data.age;
+      delete next.data.sex;
+    }
+    if (field === "chiefConcern") {
+      delete next.data.chiefConcern;
+    }
+    if (field === "room") {
+      delete next.data.room;
+    }
+    if (field === "medications") {
+      next.medicationsCaptured = false;
+      next.data.medications = [];
+    }
+    next.awaitingCorrectionField = false;
+    next.currentStep = field;
+    next.missingFields = computeMissingFields(next);
+    next.lastQuestionAsked = admissionPromptForStep(next);
+    return next;
+  }
+
+  switch (draft.currentStep) {
+    case "name": {
+      const name = parsePatientName(trimmed);
+      if (!name) return repromptAdmission(draft);
+      next.data.name = name;
+      next.nameConfirmed = false;
+      next.currentStep = "confirmName";
+      break;
+    }
+
+    case "confirmName": {
+      if (isAffirmative(trimmed)) {
+        next.nameConfirmed = true;
+        next.currentStep = getNextAdmissionStep(next);
+      } else if (isNegative(trimmed)) {
+        next.nameConfirmed = false;
+        next.currentStep = "spellNameCorrection";
+      } else {
+        return repromptAdmission(draft);
+      }
+      break;
+    }
+
+    case "spellNameCorrection": {
+      const spelled = parseSpelledName(trimmed, draft.data.name);
+      if (!spelled) {
+        next.nameSpellParseError = true;
+        next.currentStep = "spellNameCorrection";
+        return { ...next, ...repromptAdmission(next) };
+      }
+      next.data.name = spelled;
+      next.nameConfirmed = false;
+      next.nameSpellParseError = false;
+      next.currentStep = "confirmName";
+      break;
+    }
+
+    case "ageSex": {
+      const parsed = parseAgeSex(trimmed);
+      if (!parsed.age && parsed.age !== 0) {
+        return repromptAdmission(draft);
+      }
+      if (!parsed.sex) {
+        return repromptAdmission(draft);
+      }
+      next.data.age = parsed.age;
+      next.data.sex = parsed.sex;
+      next.currentStep = getNextAdmissionStep(next);
+      break;
+    }
+
+    case "chiefConcern": {
+      const concern = parseChiefConcern(trimmed, { directAnswer: true });
+      if (!concern) {
+        return repromptAdmission(draft);
+      }
+      next.data.chiefConcern = concern;
+      next.currentStep = getNextAdmissionStep(next);
+      break;
+    }
+
+    case "room": {
+      const room = parseRoom(trimmed);
+      if (!room) {
+        return repromptAdmission(draft);
+      }
+      next.data.room = room;
+      next.currentStep = getNextAdmissionStep(next);
+      break;
+    }
+
+    case "medications": {
+      const meds = parseMedication(trimmed);
+      const medsDenial =
+        /^(?:no|none|no meds?|no medications?)\b/i.test(trimmed) ||
+        /\bnot\s+(?:on\s+any|taking\s+any)\b/i.test(trimmed) ||
+        /\bno\s+current\s+medications?\b/i.test(trimmed);
+
+      if (!medsDenial && meds.length === 0) {
+        return repromptAdmission(draft);
+      }
+      next.data.medications = meds;
+      next.medicationsCaptured = true;
+      next.currentStep = getNextAdmissionStep(next);
+      break;
+    }
+
+    case "confirmation": {
+      if (isAffirmative(trimmed)) {
+        next.currentStep = "done";
+      } else if (isNegative(trimmed)) {
+        next.awaitingCorrectionField = true;
+        next.currentStep = "confirmation";
+        next.lastQuestionAsked = CORRECTION_FIELD_PROMPT;
+        next.missingFields = computeMissingFields(next);
+        return next;
+      } else {
+        return repromptAdmission(draft);
+      }
+      break;
+    }
+
+    case "done":
+      return draft;
+  }
+
+  next.missingFields = computeMissingFields(next);
+  next.lastQuestionAsked = admissionPromptForStep(next);
   return next;
 }
 
@@ -1294,10 +2155,9 @@ function buildAdmissionPayload(data: Partial<DemoPatient>): Record<string, unkno
     chiefConcern: data.chiefConcern?.trim(),
     age: typeof data.age === "number" && Number.isFinite(data.age) ? data.age : 0,
     sex: data.sex?.trim() || "Unknown",
-    allergies: data.allergies ?? [],
+    allergies: [],
     medications: data.medications ?? [],
-    triageAcuity: data.triageAcuity?.trim() || "CTAS 3",
-    ...(data.emergencyContact ? { emergencyContact: data.emergencyContact } : {}),
+    triageAcuity: "CTAS 3",
     lastVisit: new Date().toISOString().slice(0, 10),
   };
 }
@@ -2833,18 +3693,22 @@ export default function VitalOsClient() {
           if (isAdmitIntent(lower)) {
             return false;
           }
+          const cleaned = cleanVoiceCommand(command);
+          const boot = parseAdmissionBootstrap(command);
           let draft: AdmissionDraft = {
             active: true,
-            data: parseAdmissionBootstrap(command),
-            step: "chief_concern",
-            allergiesCaptured: false,
-            medicationsCaptured: false,
-            contextualAnswered: false,
+            data: boot,
+            currentStep: "name",
+            nameConfirmed: false,
+            medicationsCaptured: bootstrapExplicitMedicationsCaptured(cleaned),
+            missingFields: [],
+            lastQuestionAsked: "",
           };
-          draft = mergeAdmissionAnswer(draft, command);
+          draft.currentStep = getNextAdmissionStep(draft);
+          draft.missingFields = computeMissingFields(draft);
           setAdmissionConversation(draft);
           pushGeminiResponse(
-            draft.step === "done"
+            draft.currentStep === "done"
               ? "Ready to finalize admission."
               : admissionPromptForStep(draft)
           );
@@ -2904,7 +3768,15 @@ export default function VitalOsClient() {
         draft: AdmissionDraft,
         early: boolean
       ) => {
-        if (!hasRequiredAdmissionFields(draft.data)) {
+        const d = draft.data;
+        const nameOk = Boolean(d.name?.trim());
+        const ageOk = typeof d.age === "number" && Number.isFinite(d.age);
+        const sexOk = d.sex === "M" || d.sex === "F" || d.sex === "U";
+        const roomOk = Boolean(d.room?.trim());
+        const chiefOk = Boolean(d.chiefConcern?.trim());
+        const ready = draft.nameConfirmed && nameOk && ageOk && sexOk && roomOk && chiefOk;
+
+        if (!ready) {
           setAdmissionConversation(draft);
           pushLocalAssistantResponse(command, admissionPromptForStep(draft));
           return;
@@ -2939,7 +3811,7 @@ export default function VitalOsClient() {
           return true;
         }
         const merged = mergeAdmissionAnswer(admissionConversation, command);
-        if (merged.step === "done") {
+        if (merged.currentStep === "done") {
           await finalizeAdmissionConversation(merged, false);
           return true;
         }
@@ -2990,19 +3862,19 @@ export default function VitalOsClient() {
       }
 
       if (isAdmitIntent(lower)) {
+        const cleaned = cleanVoiceCommand(command);
+        const boot = parseAdmissionBootstrap(command);
         let draft: AdmissionDraft = {
           active: true,
-          data: parseAdmissionBootstrap(command),
-          step: "chief_concern",
-          allergiesCaptured: false,
-          medicationsCaptured: false,
-          contextualAnswered: false,
+          data: boot,
+          currentStep: "name",
+          nameConfirmed: false,
+          medicationsCaptured: bootstrapExplicitMedicationsCaptured(cleaned),
+          missingFields: [],
+          lastQuestionAsked: "",
         };
-        draft = mergeAdmissionAnswer(draft, command);
-        if (draft.step === "done") {
-          await finalizeAdmissionConversation(draft, false);
-          return true;
-        }
+        draft.currentStep = getNextAdmissionStep(draft);
+        draft.missingFields = computeMissingFields(draft);
         setAdmissionConversation(draft);
         pushLocalAssistantResponse(command, admissionPromptForStep(draft));
         return true;
@@ -3290,6 +4162,18 @@ export default function VitalOsClient() {
         setSystemState("idle");
         resumeVoiceCapture();
         return;
+      }
+
+      // Admission flow is deterministic/local. When active (or a new admit is requested),
+      // bypass Gemini entirely to avoid conflicting parsing.
+      const admissionLower = transcript.trim().toLowerCase();
+      if (admissionConversation.active || isAdmitIntent(admissionLower)) {
+        const handled = await handleClinicalCommand(transcript);
+        if (handled) {
+          setSystemState("idle");
+          resumeVoiceCapture();
+          return;
+        }
       }
 
       let geminiHandled = false;
