@@ -1,0 +1,92 @@
+-- VITAL OS — Milestone 3, stage 4: enable RLS
+--
+-- Commit path: supabase/migrations/0008_enable_rls.sql
+--
+-- Three statements. Every policy they activate was written in 0006 and has
+-- been sitting inert since, verified inert by three identical runs of
+-- `npm run test:tenancy:open`. This file is deliberately the smallest possible
+-- change, so that anything which behaves differently afterwards has exactly
+-- one cause.
+--
+-- Depends on 0006_rls_policies.sql and 0007_patients_hospital_default.sql.
+--
+-- THE MOMENT THIS RUNS, EVERY ASSERTION IN lib/tenancy-denial.spec.ts INVERTS.
+-- The command changes with it:
+--
+--     npm run test:tenancy          (--expect=closed)  from now on
+--     npm run test:tenancy:open                        baseline only, will now FAIL
+--
+-- A --expect=open run failing after this file is correct and expected. It is
+-- the last time in this milestone that a failure means success.
+
+-- ---------------------------------------------------------------------------
+-- Order: least connected first
+-- ---------------------------------------------------------------------------
+--
+-- hospitals, then clinicians, then patients. If something goes wrong it goes
+-- wrong on the table with the fewest readers, and each statement is
+-- independently reversible.
+--
+-- No FORCE ROW LEVEL SECURITY anywhere, and on clinicians that is not a
+-- preference. FORCE applies policies to the table owner, and
+-- current_hospital_id() is SECURITY DEFINER precisely so that it can read
+-- clinicians as the owner without re-entering the clinicians policy. Forcing
+-- it produces "infinite recursion detected in policy for relation clinicians"
+-- on every query that touches the table -- which is every authenticated
+-- request, because getCallerClinician() runs first.
+--
+-- It also breaks the 0004 provisioning trigger, which writes to clinicians as
+-- the owner and has no policy permitting it.
+
+alter table public.hospitals  enable row level security;
+alter table public.clinicians enable row level security;
+alter table public.patients   enable row level security;
+
+-- ---------------------------------------------------------------------------
+-- Rollback, if the live sequence surfaces something
+-- ---------------------------------------------------------------------------
+--
+--     alter table public.patients   disable row level security;
+--     alter table public.clinicians disable row level security;
+--     alter table public.hospitals  disable row level security;
+--
+-- Disabling leaves every policy in place, so the return trip is symmetric:
+-- re-enabling restores exactly this state with no re-creation. That is the
+-- reason 0006 and 0008 are separate files.
+--
+-- ---------------------------------------------------------------------------
+-- What is now true that was not before
+-- ---------------------------------------------------------------------------
+--
+-- 1. NEXT_PUBLIC_SUPABASE_ANON_KEY stops being a database credential. It ships
+--    to every browser that loads the app; until this file it granted read and
+--    write over the entire patients table via /rest/v1/patients. It is now a
+--    routing key that reaches only what a session permits. This is the
+--    precondition the anon key rotation was waiting on.
+--
+-- 2. patients.hospital_id stops being mutable across tenants. The table-level
+--    UPDATE grant still implies UPDATE on every column -- that has not changed
+--    and cannot be revoked column-wise, as M2 established against
+--    information_schema.column_privileges -- but patients_update_own_tenant's
+--    WITH CHECK now rejects any row whose new hospital_id is not the caller's.
+--    The grant permits the write; the policy rejects the result.
+--
+-- 3. A user with no clinicians row is denied everywhere rather than granted
+--    everything. current_hospital_id() returns null, and `hospital_id = null`
+--    is null rather than true. The 0004 trigger swallows its own failures by
+--    design, so this state genuinely occurs; it now fails closed.
+--
+-- ---------------------------------------------------------------------------
+-- What this does NOT close
+-- ---------------------------------------------------------------------------
+--
+-- The service_role key still bypasses RLS entirely -- that is what the role is
+-- for. Anyone holding it, or holding the Supabase dashboard, reads everything.
+-- RLS constrains clients, not operators. Operator access is a contractual and
+-- audit-log problem, not a policy problem, and this project does not solve it.
+--
+-- Role separation is still the route layer's job. These policies know nothing
+-- about doctor vs staff; requireDoctor() and isRestrictedClinicalPatch() from
+-- M2 remain the only thing standing between a staff session and a chart edit.
+-- A staff user calling PostgREST directly can still write clinical fields on
+-- patients in their own tenant.

@@ -13,7 +13,9 @@
     "test:voice": "npx tsx lib/patient-command-parser.spec.ts && npx tsx lib/patient-identification.spec.ts",
     "test:llm": "npx tsx lib/llm-race.spec.ts",
     "test:stt": "npx tsx lib/whisper-stt.spec.ts",
-    "test": "npm run test:voice && npm run test:llm && npm run test:stt"
+    "test": "npm run test:voice && npm run test:llm && npm run test:stt",
+    "test:tenancy:open": "npx tsx lib/tenancy-denial.spec.ts --expect=open",
+    "test:tenancy": "npx tsx lib/tenancy-denial.spec.ts --expect=closed"
   },
   "dependencies": {
     "@google/genai": "^2.3.0",

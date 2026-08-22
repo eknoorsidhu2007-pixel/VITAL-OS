@@ -102,8 +102,22 @@ below as its own query, **in this order**:
 | 5 | `supabase/migrations/0003_backfill_clinicians.sql` | Populates `clinicians` from existing `auth.users` |
 | 6 | `supabase/migrations/0004_clinician_provisioning_trigger.sql` | Provisions new users automatically |
 | 7 | `supabase/migrations/0005_patients_tenancy.sql` | `hospital_id` and `clinician_id` on `patients` |
+| 8 | `supabase/migrations/0006_rls_policies.sql` | Tenant policies on all three tables — RLS still disabled |
+| 9 | `supabase/migrations/0007_patients_hospital_default.sql` | `patients.hospital_id` defaults to the caller's tenant |
+| 10 | `supabase/migrations/0008_enable_rls.sql` | Enables RLS — tenant isolation becomes live |
 
 **Order matters.** Each migration references tables the previous one creates.
+
+**Steps 8 and 10 are separate on purpose.** A policy on a table with RLS
+disabled is inert — Postgres stores it and never consults it. Splitting them
+means the cross-tenant denial test can run against a database that has every
+policy in place and still allows everything, then run again after step 10 with
+the same assertions flipping from allowed to denied. A denial test written after
+RLS is on can pass because the policy works or because the query is broken.
+
+**`supabase/fixtures/` is not part of this order.** It seeds a second hospital
+and a patient in it, for the cross-tenant denial test only. Skip it for a normal
+setup; see [Tenant isolation](#tenant-isolation) if you want to run the test.
 
 **Step 2 is required, not optional.** Skipping it does not produce an error —
 `lib/patient-store.ts` catches the missing column and retries without it, so
@@ -137,21 +151,38 @@ select
   (select count(*) from auth.users)                                as auth_users,
   (select count(*) from public.patients where hospital_id is null) as patients_without_tenant,
   (select count(*) from pg_trigger
-     where tgrelid = 'auth.users'::regclass and not tgisinternal)  as auth_triggers;
+     where tgrelid = 'auth.users'::regclass and not tgisinternal)  as auth_triggers,
+  (select count(*) from pg_class
+     where relnamespace = 'public'::regnamespace
+       and relname in ('hospitals','clinicians','patients')
+       and relrowsecurity)                                         as rls_tables,
+  (select count(*) from pg_policy p join pg_class c on c.oid = p.polrelid
+     where c.relnamespace = 'public'::regnamespace)                as policies;
 ```
 
-`clinicians` must equal `auth_users`, `patients_without_tenant` must be `0`, and
-`auth_triggers` must be `2`. A clinician count below the user count means
-someone will authenticate successfully and then be denied every action.
+`clinicians` must equal `auth_users`, `patients_without_tenant` must be `0`,
+`auth_triggers` must be `2`, `rls_tables` must be `3`, and `policies` must be
+`6`. A clinician count below the user count means someone will authenticate
+successfully and then be denied every action. `rls_tables` at `3` with
+`policies` at `0` is the worst state available: every read returns nothing and
+no error is raised anywhere.
 
-> **If Supabase prompts you to "Enable RLS", decline it.** This demo runs with
-> Row Level Security disabled — see [Security posture](#security-posture).
-> Enabling RLS without policies returns zero rows on every read, with no error.
-> Decline the linter's auto-generated `USING (true)` policy too; it grants
-> everything while looking like a control.
+> **RLS is enabled by step 10, and only by step 10.** If the Supabase linter
+> prompts you to enable it earlier, decline. Enabling RLS before step 8 has
+> created the policies returns zero rows on every read with no error — the app
+> loads and the roster is silently empty.
+>
+> Decline the linter's auto-generated `USING (true)` policy in any case. It
+> satisfies the linter and grants everything, which is worse than no policy at
+> all because it looks like a control.
 
 You do **not** need to seed patient data manually. The first call to
 `listPatients()` runs `seedDemoPatientsIfEmpty()` and inserts the demo roster.
+
+Note that "empty" is tenant-scoped once RLS is on: the check counts rows the
+*caller* can see, and the rows it inserts land in the caller's tenant via the
+step-9 default. A clinician in a hospital with no patients seeds a copy of the
+demo roster into their own tenant rather than seeing an empty list.
 
 ### 4. Run
 
@@ -374,6 +405,8 @@ frozen page, which is expected rather than a bug.
 | `supabase/*.sql` | Original schema, applied before `migrations/` existed |
 | `supabase/migrations/*.sql` | Ordered schema changes; run by number |
 | `supabase/checks/*.sql` | Read-only verification for each migration |
+| `supabase/fixtures/*.sql` | Second-tenant seed for the denial test; not part of setup |
+| `lib/tenancy-denial.spec.ts` | Cross-tenant denial probes; run by `npm run test:tenancy` |
 
 ---
 
@@ -389,6 +422,7 @@ npm test             # all suites below
 npm run test:voice   # command parser + patient identification
 npm run test:llm     # race, budget, retry, fallback
 npm run test:stt     # Whisper contract and transcript arbitration
+npm run test:tenancy # cross-tenant denial test — live DB, not in `npm test`
 ```
 
 Typecheck with the repo's own TypeScript rather than `npx tsc`, which resolves a
@@ -420,6 +454,85 @@ full Groq budget before falling back.
 
 ---
 
+## Tenant isolation
+
+Every row in `patients` and `clinicians` belongs to a hospital, and Row Level
+Security enforces that boundary in the database rather than in route handlers.
+The predicate is one function, `public.current_hospital_id()`, which returns the
+caller's `hospital_id` from `clinicians` keyed on `auth.uid()`. Six policies
+compare each row against it.
+
+Three properties of that function are load-bearing and easy to break:
+
+- **`SECURITY DEFINER`, and not for speed.** The policy on `clinicians` needs
+  the caller's hospital, which means selecting from `clinicians`, which fires
+  the policy again. Postgres reports *infinite recursion detected in policy for
+  relation clinicians* and every authenticated request fails, because
+  `getCallerClinician()` runs first. Owner rights break the circle.
+- **Never `FORCE ROW LEVEL SECURITY` on `clinicians`.** `FORCE` applies policies
+  to the table owner too, which restores that recursion and also breaks the
+  provisioning trigger, which writes as the owner under no policy.
+- **`STABLE`, and called as `(select public.current_hospital_id())`.** The
+  scalar subquery lets Postgres hoist it to an InitPlan and evaluate it once per
+  statement instead of once per row.
+
+Null is the fail-closed value. A caller with no session, or with no `clinicians`
+row, gets null, and `hospital_id = null` is null rather than true — so every
+policy denies. The provisioning trigger swallows its own failures by design, so
+that state genuinely occurs.
+
+### Denial shapes
+
+RLS denials do not all look alike, and only one of them is an error:
+
+| Denial | Result |
+|---|---|
+| `SELECT` excluded by `USING` | HTTP 200, empty array |
+| `UPDATE` or `DELETE` excluded by `USING` | success, zero rows affected |
+| `INSERT` or `UPDATE` rejected by `WITH CHECK` | HTTP 403, SQLSTATE `42501` |
+
+Assertions keyed on status codes score the middle row as a pass. Count rows
+instead.
+
+At the route layer a cross-tenant `GET /api/patients/:id` returns **404, not
+403** — `getPatientById()` uses `.maybeSingle()`, so an invisible row and a
+missing row are indistinguishable. That is correct and deliberate.
+
+### Running the denial test
+
+```bash
+npm run test:tenancy
+```
+
+Twelve probes: eight cross-tenant denials and four same-tenant guards. The
+guards matter as much as the denials — a policy that denies everything turns all
+eight denial assertions green while breaking the application completely.
+
+It sits outside `npm test` deliberately. The other suites are hermetic; this one
+needs a live project, credentials, and the fixture.
+
+Setup:
+
+1. Create a second clinician in the dashboard (**Authentication → Users → Add
+   user**), auto-confirmed, with `{"role":"doctor"}` in user metadata. The role
+   must be `doctor`: a `staff` account is refused clinical writes by the route
+   layer, which would make every denial unattributable to tenancy.
+2. Run `supabase/fixtures/cross_tenant_fixture.sql`. It raises rather than
+   proceeding if that account is missing.
+3. Put both accounts' credentials in a file outside the repo — default
+   `~/vital-os-ops/.env.tenancy`, or point `VITAL_OPS_ENV` at one. Keys:
+   `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`,
+   `TENANT_A_EMAIL`, `TENANT_A_PASSWORD`, `TENANT_B_EMAIL`, `TENANT_B_PASSWORD`.
+
+`supabase/fixtures/cross_tenant_teardown.sql` reverses it.
+
+The same file runs in the other direction with `npm run test:tenancy:open`,
+which asserts every cross-tenant probe is *allowed*. That mode exists to record
+a baseline before RLS is enabled; against the current schema it is expected to
+fail on all eight.
+
+---
+
 ## Security posture
 
 This is a **demo application** and should not be pointed at real patient data.
@@ -441,25 +554,35 @@ It is not production-ready and makes no claim to HIPAA compliance.
   `patients.clinician_id`, taken from the session and never from the request
   body.
 
-**What is not yet enforced:**
+- Tenant isolation is enforced by Row Level Security on `hospitals`,
+  `clinicians`, and `patients`. The anon key — exposed to every browser by
+  design — reaches only what the session's tenant permits, and a signed-out
+  caller hitting PostgREST directly reads nothing. See
+  [Tenant isolation](#tenant-isolation).
+- `patients.hospital_id` cannot be reassigned across tenants. The table-level
+  `UPDATE` grant still implies update on every column, and a column-level revoke
+  cannot remove it — but the `WITH CHECK` clause on the update policy rejects
+  any row whose new tenant is not the caller's. The grant permits the write; the
+  policy rejects the result.
 
-- Row Level Security is **disabled** on `hospitals`, `clinicians`, and
-  `patients`. Anyone holding the anon key — exposed to every browser by design —
-  can read and write every row directly through PostgREST, bypassing the route
-  handlers entirely. The role gate above protects the API, not the database.
-- `patients.hospital_id` is not immutable. `patients` carries a table-level
-  `UPDATE` grant, which implies update on every column; a column-level revoke
-  cannot remove it. A client could reassign a patient's tenant through
-  PostgREST.
+**What is not enforced:**
+
 - `user_metadata` is writable by the account holder via `auth.updateUser()`, and
-  the provisioning trigger mirrors metadata into `clinicians`. Until RLS lands,
-  that path is a self-service role change.
+  the provisioning trigger mirrors metadata into `clinicians`. That is a
+  self-service role change: an account can promote itself from `staff` to
+  `doctor`. It does not cross tenants — RLS confines the result to one hospital
+  — but within a tenant it defeats the role gate.
+- Role separation lives in the route layer only. The policies know nothing about
+  `doctor` versus `staff`, so a staff session calling PostgREST directly can
+  still write clinical fields on patients in its own tenant.
+- The `service_role` key bypasses RLS entirely, as it is designed to. Anyone
+  holding it, or holding the Supabase dashboard, reads everything. RLS
+  constrains clients, not operators — operator access is a contractual and
+  audit-log problem, and this project does not solve it.
 
-Authentication and API-level authorization are real; **database-level isolation
-is not**. Closing that gap means RLS policies with `with check` on every write,
-pinning `hospital_id` to the caller's tenant, enabled last — verified by
-confirming a cross-tenant read returns zero rows and a cross-tenant write is
-refused.
+Authentication, API-level authorization, and database-level tenant isolation are
+all real. **Role escalation within a tenant, and operator access, are not
+addressed.**
 
 Real clinical systems authenticate staff by network ID through enterprise SSO
 (SAML/OIDC against a hospital directory), not email. Supabase supports SSO;
