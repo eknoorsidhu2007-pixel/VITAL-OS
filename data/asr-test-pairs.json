@@ -1,0 +1,14 @@
+[
+    {"raw": "mail", "question": "What is the patient's sex?", "expected": "male"},
+    {"raw": "femail", "question": "What is the patient's sex?", "expected": "female"},
+    {"raw": "hyper extended knee", "question": "Chief concern?", "expected": "hyperextended knee"},
+    {"raw": "short of breath", "question": "Chief concern?", "expected": "shortness of breath"},
+    {"raw": "chest pains", "question": "Chief concern?", "expected": "chest pain"},
+    {"raw": "stomach pain", "question": "Chief concern?", "expected": "abdominal pain"},
+    {"raw": "head ache", "question": "Chief concern?", "expected": "headache"},
+    {"raw": "car accident", "question": "Chief concern?", "expected": "motor vehicle accident"},
+    {"raw": "passed out", "question": "Chief concern?", "expected": "loss of consciousness"},
+    {"raw": "fainted", "question": "Chief concern?", "expected": "syncope"},
+    {"raw": "heart racing", "question": "Chief concern?", "expected": "palpitations"},
+    {"raw": "twisted ankle", "question": "Chief concern?", "expected": "sprained ankle"}
+  ]
