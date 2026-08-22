@@ -360,21 +360,17 @@ export function parsePatientCommand(transcript: string): ParsedPatientCommand {
       .trim();
     if (medOnly) {
       const patientTail = text.match(/\s+(?:to|for)\s+(.+)$/i);
+      if (!patientTail) {
+        return { intent: "unknown", confidence: "low" };
+      }
       return {
         intent: "addMedication",
         medication: titleCaseMedication(medOnly),
-        patientHint: patientTail?.[1]?.trim(),
-        confidence: patientTail ? "high" : "low",
+        patientHint: patientTail[1].trim(),
+        confidence: "high",
       };
     }
   }
 
   return { intent: "unknown", confidence: "low" };
 }
-
-export function isPatientModifyIntent(intent: PatientCommandIntent): boolean {
-  return intent !== "unknown" && intent !== "patientSummary";
-}
-
-export const PERMISSION_DENIED_MESSAGE =
-  "You do not have permission to perform that action.";
