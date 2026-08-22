@@ -2878,6 +2878,11 @@ export default function VitalOsClient() {
   const ignoreNextEndRef = React.useRef(false);
   /** When `start()` hits InvalidStateError, we `abort()` and call `start()` again from `onend`. */
   const resumeStartAfterEndRef = React.useRef(false);
+  /**
+   * True only when the user explicitly stops/mutes the mic. Unexpected
+   * SpeechRecognition `onend` / recoverable `onerror` events restart when false.
+   */
+  const intentionallyStoppedRef = React.useRef(false);
   const finalRef = React.useRef("");
   const interimRef = React.useRef("");
   const utteranceRef = React.useRef<SpeechSynthesisUtterance | null>(null);
@@ -3422,6 +3427,17 @@ export default function VitalOsClient() {
       if (code === "aborted") {
         return;
       }
+      if (code === "no-speech" || code === "audio-capture") {
+        if (!intentionallyStoppedRef.current) {
+          try {
+            intentionallyStoppedRef.current = false;
+            rec.start();
+          } catch {
+            /* already starting */
+          }
+        }
+        return;
+      }
       let msg = `Microphone error: ${code}`;
       if (code === "not-allowed" || code === "service-not-allowed") {
         listeningIntentRef.current = false;
@@ -3429,20 +3445,6 @@ export default function VitalOsClient() {
         setVoiceSessionLive(false);
         msg =
           "Microphone permission was denied. Allow mic access in your browser to use VITAL OS.";
-      } else if (code === "no-speech") {
-        if (
-          listeningIntentRef.current &&
-          voiceSessionActiveRef.current &&
-          !micMutedRef.current
-        ) {
-          resumeVoiceCaptureRef.current();
-        }
-        return;
-      } else if (code === "audio-capture") {
-        listeningIntentRef.current = false;
-        voiceSessionActiveRef.current = false;
-        setVoiceSessionLive(false);
-        msg = "No microphone detected. Connect a mic and try again.";
       } else if (code === "network") {
         msg =
           "Speech recognition needs an internet connection (Chrome sends audio to Google). Check your network.";
@@ -3475,6 +3477,7 @@ export default function VitalOsClient() {
       if (resumeStartAfterEndRef.current) {
         resumeStartAfterEndRef.current = false;
         try {
+          intentionallyStoppedRef.current = false;
           rec.start();
         } catch {
           listeningIntentRef.current = false;
@@ -3498,12 +3501,14 @@ export default function VitalOsClient() {
         return;
       }
 
-      /* Session ended unexpectedly while still listening — restart after a tick (Chromium quirk). */
-      if (listeningIntentRef.current && !micMutedRef.current) {
-        globalThis.setTimeout(() => {
-          if (!listeningIntentRef.current || micMutedRef.current) return;
-          resumeVoiceCaptureRef.current();
-        }, 200);
+      /* Unexpected end (not a user stop/mute) — restart recognition in place. */
+      if (!intentionallyStoppedRef.current) {
+        try {
+          intentionallyStoppedRef.current = false;
+          rec.start();
+        } catch {
+          /* already starting */
+        }
         return;
       }
 
@@ -3542,6 +3547,7 @@ export default function VitalOsClient() {
         }
         if (recognitionActiveRef.current) return;
         try {
+          intentionallyStoppedRef.current = false;
           rec.start();
         } catch (err) {
           const invalid =
@@ -3557,6 +3563,7 @@ export default function VitalOsClient() {
               const again = mountRecognition();
               if (!again) return;
               try {
+                intentionallyStoppedRef.current = false;
                 again.start();
               } catch {
                 setError("Could not start the microphone. Please try again.");
@@ -3594,6 +3601,7 @@ export default function VitalOsClient() {
       resumeStartAfterEndRef.current = false;
 
       try {
+        intentionallyStoppedRef.current = false;
         rec.start();
       } catch (err) {
         const invalid =
@@ -3612,6 +3620,7 @@ export default function VitalOsClient() {
               return;
             }
             try {
+              intentionallyStoppedRef.current = false;
               again.start();
             } catch {
               listeningIntentRef.current = false;
@@ -3636,6 +3645,7 @@ export default function VitalOsClient() {
   }, [startListening]);
 
   const stopListening = React.useCallback((opts?: { submit?: boolean }) => {
+    intentionallyStoppedRef.current = true;
     listeningIntentRef.current = false;
     const rec = recognitionRef.current;
     if (!rec) {
@@ -5095,6 +5105,7 @@ export default function VitalOsClient() {
     setMicMuted(false);
     voiceSessionActiveRef.current = true;
     listeningIntentRef.current = true;
+    intentionallyStoppedRef.current = false;
     setSttChoice(null);
     void recorderRef.current.start();
     void startListening({ hard: true });
@@ -5105,6 +5116,7 @@ export default function VitalOsClient() {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
+    intentionallyStoppedRef.current = true;
     setVoiceSessionLive(false);
     voiceSessionActiveRef.current = false;
     listeningIntentRef.current = false;
@@ -5140,6 +5152,7 @@ export default function VitalOsClient() {
       const next = !prev;
       micMutedRef.current = next;
       if (next) {
+        intentionallyStoppedRef.current = true;
         listeningIntentRef.current = false;
         if (silenceTimerRef.current) {
           clearTimeout(silenceTimerRef.current);
@@ -5162,6 +5175,7 @@ export default function VitalOsClient() {
         recorderRef.current.stop();
         setSystemState("idle");
       } else {
+        intentionallyStoppedRef.current = false;
         listeningIntentRef.current = true;
         void recorderRef.current.start();
         void startListening({ hard: false });
