@@ -11,7 +11,7 @@ except ImportError:
     print("pip install sentence-transformers torch")
     sys.exit(1)
 
-VOCAB_PATH = Path("data/medical-vocabulary=with-embeddings.json")
+VOCAB_PATH = Path("data/medical-vocabulary-with-embeddings.json")
 TEST_PATH = Path("data/asr-test-pairs.json")
 
 def main():
@@ -20,27 +20,32 @@ def main():
         sys.exit(1)
 
     model = SentenceTransformer("all-MiniLM-L6-v2")
-    with open(VOCAB_PATH) as f: vocab = json.load(f)
-    with open(TEST_PATH) as f: tests = json.load(f)
+    with open(VOCAB_PATH) as f:
+        vocab = json.load(f)
+    with open(TEST_PATH) as f:
+        tests = json.load(f)
 
     embeddings = [e["embedding"] for e in vocab]
     terms = [e["term"] for e in vocab]
 
-        p1 = r3 = mrr = 0
+    p1 = r3 = mrr = 0
     for pair in tests:
         raw, expected = pair["raw"], pair["expected"].lower()
         raw_emb = model.encode(raw)
         scores = [util.cos_sim(raw_emb, e).item() for e in embeddings]
         ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
-        rank = next((i+1 for i, (idx, _) in enumerate(ranked) if terms[idx].lower() == expected), None)
-        if rank == 1: p1 += 1
-        if rank and rank <= 3: r3 += 1
-        if rank: mrr += 1.0 / rank
+        rank = next((i + 1 for i, (idx, _) in enumerate(ranked) if terms[idx].lower() == expected), None)
+        if rank == 1:
+            p1 += 1
+        if rank and rank <= 3:
+            r3 += 1
+        if rank:
+            mrr += 1.0 / rank
 
     n = len(tests)
-    print(f"Precision@1: {p1/n:.3f}")
-    print(f"Recall@3:    {r3/n:.3f}")
-    print(f"MRR:         {mrr/n:.3f}")
+    print(f"Precision@1: {p1 / n:.3f}")
+    print(f"Recall@3:    {r3 / n:.3f}")
+    print(f"MRR:         {mrr / n:.3f}")
 
 if __name__ == "__main__":
     main()
