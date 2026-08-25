@@ -4677,20 +4677,11 @@ export default function VitalOsClient() {
           return;
         }
         const { patientId, patientName } = dischargeWorkflowRef.current;
-        const providerName =
-          role === "doctor" && user?.userName
-            ? formatDoctorDisplayName(user.userName)
-            : user?.userName ?? "Provider";
-        const { ok } = await persistPatientPatch(
-          patientId,
-          {
-            discharge: true,
-            dischargeReason: reason,
-            dischargedBy: providerName,
-            encounterStatus: "Discharged",
-          }
+        const res = await fetch(
+          `/api/patients/${encodeURIComponent(patientId)}`,
+          { method: "DELETE" }
         );
-        if (!ok) {
+        if (!res.ok) {
           pushLocalAssistantResponse(transcript, "Discharge failed. Try again.");
           setSystemState("idle");
           resumeVoiceCapture();
