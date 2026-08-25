@@ -3252,15 +3252,25 @@ export default function VitalOsClient() {
 
       if (recorderRef.current.available) {
         /* Whisper adds ~400ms between endpoint and submit; show work immediately. */
+        systemStateRef.current = "processing";
         setSystemState("processing");
-        const outcome = await recorderRef.current.finalize();
-        choice = outcome
-          ? chooseTranscript(outcome, browserText)
-          : {
-              text: browserText,
-              source: "browser",
-              degradedReason: "Clip too short to transcribe.",
-            };
+        try {
+          const outcome = await recorderRef.current.finalize();
+          choice = outcome
+            ? chooseTranscript(outcome, browserText)
+            : {
+                text: browserText,
+                source: "browser",
+                degradedReason: "Clip too short to transcribe.",
+              };
+        } catch {
+          choice = {
+            text: browserText,
+            source: "browser",
+            degradedReason:
+              "Audio transcription failed; using browser transcript.",
+          };
+        }
       }
 
       setSttChoice(choice);
@@ -3269,13 +3279,22 @@ export default function VitalOsClient() {
       }
 
       if (!choice.text) {
+        systemStateRef.current = "idle";
         setSystemState("idle");
         return;
       }
 
       setLastSubmittedTranscript(choice.text);
       setHeardPreview(choice.text);
-      await submitRef.current(choice.text);
+      try {
+        await submitRef.current(choice.text);
+      } catch {
+        /* submit must self-clear processing; last-resort safety net */
+        if (systemStateRef.current === "processing") {
+          systemStateRef.current = "idle";
+          setSystemState("idle");
+        }
+      }
     },
     [apiRole]
   );
@@ -3676,6 +3695,7 @@ export default function VitalOsClient() {
     setInterimTranscript("");
     interimRef.current = "";
     setLastSubmittedTranscript("");
+    setHeardPreview("");
     setLastCommand("System ready");
     setAdmissionConversation(EMPTY_ADMISSION);
   }, []);
@@ -4600,13 +4620,23 @@ export default function VitalOsClient() {
       const finalMode: VitalMode =
         overrideMode ?? (emergencyArmed ? "emergency" : mode);
 
+      systemStateRef.current = "processing";
       setSystemState("processing");
       setError(null);
       setLastSubmittedTranscript(transcript);
       setLastCommand(transcript.trim());
 
+      let leaveToSpeech = false;
+      let released = false;
+      const releaseProcessing = (next: "idle" | "error" = "idle") => {
+        released = true;
+        systemStateRef.current = next;
+        setSystemState(next);
+      };
+
+      try {
       if (micMutedRef.current) {
-        setSystemState("idle");
+        releaseProcessing("idle");
         return;
       }
 
@@ -4614,14 +4644,14 @@ export default function VitalOsClient() {
         if (pendingMedicationOrder) {
           setPendingMedicationOrder(null);
           pushLocalAssistantResponse(transcript, "Medication order cancelled.");
-          setSystemState("idle");
+          releaseProcessing("idle");
           resumeVoiceCapture();
           return;
         }
         if (dischargeConfirmId) {
           setDischargeConfirmId(null);
           pushLocalAssistantResponse(transcript, "Discharge cancelled.");
-          setSystemState("idle");
+          releaseProcessing("idle");
           resumeVoiceCapture();
           return;
         }
@@ -4635,7 +4665,7 @@ export default function VitalOsClient() {
           transcript,
           `Order placed. Pharmacy notified for ${draft.medication} — ${draft.patientName}.`
         );
-        setSystemState("idle");
+        releaseProcessing("idle");
         resumeVoiceCapture();
         return;
       }
@@ -4644,7 +4674,7 @@ export default function VitalOsClient() {
         setDischargeWorkflow(null);
         setDischargeConfirmId(null);
         pushLocalAssistantResponse(transcript, "Discharge cancelled.");
-        setSystemState("idle");
+        releaseProcessing("idle");
         resumeVoiceCapture();
         return;
       }
@@ -4660,7 +4690,7 @@ export default function VitalOsClient() {
           transcript,
           "What is the discharge reason? Options include Recovered, Transfer, Left against medical advice, Deceased, or Other."
         );
-        setSystemState("idle");
+        releaseProcessing("idle");
         resumeVoiceCapture();
         return;
       }
@@ -4672,7 +4702,7 @@ export default function VitalOsClient() {
             transcript,
             "Please state the discharge reason. For example: Recovered, Transfer, Left against medical advice, Deceased, or Other."
           );
-          setSystemState("idle");
+          releaseProcessing("idle");
           resumeVoiceCapture();
           return;
         }
@@ -4683,7 +4713,7 @@ export default function VitalOsClient() {
         );
         if (!res.ok) {
           pushLocalAssistantResponse(transcript, "Discharge failed. Try again.");
-          setSystemState("idle");
+          releaseProcessing("idle");
           resumeVoiceCapture();
           return;
         }
@@ -4700,7 +4730,7 @@ export default function VitalOsClient() {
           transcript,
           `${patientName} has been discharged. Reason: ${reason}. Patient moved to discharged list.`
         );
-        setSystemState("idle");
+        releaseProcessing("idle");
         resumeVoiceCapture();
         return;
       }
@@ -4717,7 +4747,7 @@ export default function VitalOsClient() {
           transcript,
           "What is the discharge reason? Options include Recovered, Transfer, Left against medical advice, Deceased, or Other."
         );
-        setSystemState("idle");
+        releaseProcessing("idle");
         resumeVoiceCapture();
         return;
       }
@@ -4726,7 +4756,7 @@ export default function VitalOsClient() {
       if (localParsedEarly.intent !== "unknown") {
         const handledLocal = await handleClinicalCommand(transcript);
         if (handledLocal) {
-          setSystemState("idle");
+          releaseProcessing("idle");
           resumeVoiceCapture();
           return;
         }
@@ -4734,7 +4764,7 @@ export default function VitalOsClient() {
 
       if (!permissions.canUseAI) {
         pushLocalAssistantResponse(transcript, AI_ASSISTANT_RESTRICTED_MESSAGE);
-        setSystemState("idle");
+        releaseProcessing("idle");
         resumeVoiceCapture();
         return;
       }
@@ -4745,7 +4775,7 @@ export default function VitalOsClient() {
       if (admissionConversation.active || isAdmitIntent(admissionLower)) {
         const handled = await handleClinicalCommand(transcript);
         if (handled) {
-          setSystemState("idle");
+          releaseProcessing("idle");
           resumeVoiceCapture();
           return;
         }
@@ -4774,14 +4804,14 @@ export default function VitalOsClient() {
       }
 
       if (geminiHandled) {
-        setSystemState("idle");
+        releaseProcessing("idle");
         resumeVoiceCapture();
         return;
       }
 
       const handled = await handleClinicalCommand(transcript);
       if (handled) {
-        setSystemState("idle");
+        releaseProcessing("idle");
         resumeVoiceCapture();
         return;
       }
@@ -4853,9 +4883,12 @@ export default function VitalOsClient() {
         );
 
         if (voiceEnabled && supportsTts) {
+          leaveToSpeech = true;
+          systemStateRef.current = "speaking";
+          setSystemState("speaking");
           speak(ok.text);
         } else {
-          setSystemState("idle");
+          releaseProcessing("idle");
           if (voiceSessionActiveRef.current) {
             globalThis.setTimeout(
               () => startListeningContinueRef.current({ hard: false }),
@@ -4868,7 +4901,7 @@ export default function VitalOsClient() {
         const message =
           err instanceof Error ? err.message : "Unknown VITAL OS error.";
         setError(message);
-        setSystemState("error");
+        releaseProcessing("error");
         if (voiceSessionActiveRef.current) {
           globalThis.setTimeout(
             () => startListeningContinueRef.current({ hard: false }),
@@ -4888,6 +4921,26 @@ export default function VitalOsClient() {
             ...prev,
           ].slice(0, 80)
         );
+      }
+      } catch (err) {
+        if ((err as { name?: string })?.name !== "AbortError") {
+          const message =
+            err instanceof Error ? err.message : "Unknown VITAL OS error.";
+          setError(message);
+        }
+        if (!leaveToSpeech && !released) {
+          releaseProcessing("idle");
+          if (voiceSessionActiveRef.current && !micMutedRef.current) {
+            resumeVoiceCapture();
+          }
+        }
+      } finally {
+        if (!leaveToSpeech && !released) {
+          releaseProcessing("idle");
+          if (voiceSessionActiveRef.current && !micMutedRef.current) {
+            resumeVoiceCapture();
+          }
+        }
       }
     },
     [
