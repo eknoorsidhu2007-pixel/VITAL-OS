@@ -882,6 +882,16 @@ function roomsMatch(patientRoom: string, queryRoom: string): boolean {
   return a === b || a.includes(b) || b.includes(a);
 }
 
+/** Exact room occupancy (normalized). Do not use substring roomsMatch here. */
+function findActiveOccupantByRoom(
+  patients: DemoPatient[],
+  room: string
+): DemoPatient | undefined {
+  const target = normalizeRoomLabel(room);
+  if (!target) return undefined;
+  return patients.find((p) => normalizeRoomLabel(p.room) === target);
+}
+
 function extractRoomQuery(transcript: string): string | null {
   const q = transcript.trim();
   const patterns = [
@@ -1470,8 +1480,11 @@ const GENERIC_ADMISSION_INTENT_PHRASES = new Set([
   "admit new patient",
   "admit the patient",
   "i'd like to admit a patient",
+  "i'd like to admit patient",
   "i would like to admit a patient",
+  "i would like to admit patient",
   "i want to admit a patient",
+  "i want to admit patient",
   "can you admit a patient",
   "please admit a patient",
   "create a patient",
@@ -1500,7 +1513,7 @@ function isGenericAdmissionIntentOnly(text: string): boolean {
 function stripAdmissionIntentPhrases(text: string): string {
   let t = text.trim();
   const intentPrefix =
-    /^(?:i(?:'d| would| want to)\s+(?:like to\s+)?|can you\s+|could you\s+|please\s+|let's\s+)?(?:admit|add|create)(?:\s+a)?(?:\s+new)?(?:\s+patient)?\b/i;
+    /^(?:i(?:'d like to| would like to| want to)\s+|can you\s+|could you\s+|please\s+|let's\s+)?(?:admit|add|create)(?:\s+a)?(?:\s+new)?(?:\s+patient)?\b/i;
   while (intentPrefix.test(t)) {
     t = t.replace(intentPrefix, "").trim();
   }
@@ -1534,21 +1547,32 @@ function parsePatientName(input: string): string | undefined {
 
   if (isNegative(q) || isAffirmative(q) || isSkipLike(q)) return undefined;
 
-  // Pull candidate after explicit name cues.
-  const explicit =
-    q.match(
-      /\b(?:patient\s+is|name\s+is|called|named)\s+([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,3})/i
-    )?.[1] ?? undefined;
+  const stopRx =
+    /\b(?:\d{1,3}\s*(?:year[s]?\s*old|yo)?\s*(?:male|female)?|male|female|room|bed|bay|acuity|chief\s+concern|allergies?|medications?|needs?|give|start|order|emergency\s*contact)\b/i;
 
-  let candidate = explicit;
+  // Highest priority: straight "admit patient <Name>" (also a/new/the patient).
+  let candidate =
+    q.match(
+      /^(?:admit|add|create)(?:\s+a)?(?:\s+new)?(?:\s+the)?\s+patient\s+([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,3})/i
+    )?.[1] ?? undefined;
+  if (candidate) {
+    candidate = candidate.split(stopRx)[0]?.trim();
+  }
+
+  // Pull candidate after explicit name cues.
   if (!candidate) {
-    // Name immediately after "admit patient" / "admit a patient" (must not be generic).
+    candidate =
+      q.match(
+        /\b(?:patient\s+is|name\s+is|called|named)\s+([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,3})/i
+      )?.[1] ?? undefined;
+  }
+
+  if (!candidate) {
+    // Name immediately after "admit patient" / "admit a patient" mid-utterance.
     const afterAdmitPatient = q.match(
-      /\b(?:admit|add|create)(?:\s+a)?(?:\s+new)?\s+patient\s+(?!named|called|name\s+is)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,3})/i
+      /\b(?:admit|add|create)(?:\s+a)?(?:\s+new)?(?:\s+the)?\s+patient\s+(?!named|called|name\s+is)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,3})/i
     )?.[1];
     if (afterAdmitPatient) {
-      const stopRx =
-        /\b(?:\d{1,3}\s*(?:year[s]?\s*old|yo)?\s*(?:male|female)?|male|female|room|bed|bay|acuity|chief\s+concern|allergies?|medications?|needs?|give|start|order|emergency\s*contact)\b/i;
       candidate = afterAdmitPatient.split(stopRx)[0]?.trim();
     }
   }
@@ -2795,6 +2819,7 @@ export default function VitalOsClient() {
     chiefConcern: "",
     triageAcuity: "CTAS 3",
   });
+  const [admitRoomError, setAdmitRoomError] = React.useState<string | null>(null);
   const [admissionConversation, setAdmissionConversation] =
     React.useState<AdmissionDraft>(EMPTY_ADMISSION);
   const isCreatingPatientRef = React.useRef(false);
@@ -3284,6 +3309,10 @@ export default function VitalOsClient() {
         return;
       }
 
+      if (!voiceSessionActiveRef.current || micMutedRef.current) {
+        return;
+      }
+
       setLastSubmittedTranscript(choice.text);
       setHeardPreview(choice.text);
       try {
@@ -3384,7 +3413,13 @@ export default function VitalOsClient() {
     };
 
     rec.onresult = (ev) => {
-      if (micMutedRef.current) return;
+      if (
+        micMutedRef.current ||
+        !voiceSessionActiveRef.current ||
+        !listeningIntentRef.current
+      ) {
+        return;
+      }
 
       const { interim, finalDelta } = readRecognitionTranscripts(ev);
 
@@ -4260,6 +4295,24 @@ export default function VitalOsClient() {
           return;
         }
 
+        const requestedRoom = d.room?.trim() ?? "";
+        const occupant = findActiveOccupantByRoom(patients, requestedRoom);
+        if (occupant) {
+          const blocked: AdmissionDraft = {
+            ...draft,
+            currentStep: "room",
+            awaitingCorrectionField: false,
+            missingFields: computeMissingFields(draft),
+            lastQuestionAsked: `Room ${requestedRoom} is currently occupied by ${occupant.name}. Please specify a different room.`,
+          };
+          setAdmissionConversation(blocked);
+          pushLocalAssistantResponse(
+            command,
+            `Room ${requestedRoom} is currently occupied by ${occupant.name}. Please specify a different room.`
+          );
+          return;
+        }
+
         const payload = buildAdmissionPayload(draft.data);
         console.log("[PATIENT CREATE] Frontend payload:", payload);
 
@@ -4313,10 +4366,58 @@ export default function VitalOsClient() {
       if (admissionConversation.active) {
         if (isAdmissionFinalizePhrase(command)) {
           const merged = mergeAdmissionAnswer(admissionConversation, command);
+          if (
+            admissionConversation.currentStep === "room" &&
+            merged.data.room?.trim()
+          ) {
+            const roomLabel = merged.data.room.trim();
+            const occupant = findActiveOccupantByRoom(patients, roomLabel);
+            if (occupant) {
+              const cleared = { ...merged.data, room: undefined };
+              const blocked: AdmissionDraft = {
+                ...merged,
+                data: cleared,
+                currentStep: "room",
+                awaitingCorrectionField: false,
+                missingFields: computeMissingFields({
+                  ...merged,
+                  data: cleared,
+                }),
+                lastQuestionAsked: `Room ${roomLabel} is currently occupied by ${occupant.name}. Please specify a different room.`,
+              };
+              setAdmissionConversation(blocked);
+              pushLocalAssistantResponse(command, blocked.lastQuestionAsked!);
+              return true;
+            }
+          }
           await finalizeAdmissionConversation(merged, true);
           return true;
         }
         const merged = mergeAdmissionAnswer(admissionConversation, command);
+        if (
+          admissionConversation.currentStep === "room" &&
+          merged.data.room?.trim()
+        ) {
+          const roomLabel = merged.data.room.trim();
+          const occupant = findActiveOccupantByRoom(patients, roomLabel);
+          if (occupant) {
+            const cleared = { ...merged.data, room: undefined };
+            const blocked: AdmissionDraft = {
+              ...merged,
+              data: cleared,
+              currentStep: "room",
+              awaitingCorrectionField: false,
+              missingFields: computeMissingFields({
+                ...merged,
+                data: cleared,
+              }),
+              lastQuestionAsked: `Room ${roomLabel} is currently occupied by ${occupant.name}. Please specify a different room.`,
+            };
+            setAdmissionConversation(blocked);
+            pushLocalAssistantResponse(command, blocked.lastQuestionAsked!);
+            return true;
+          }
+        }
         if (merged.currentStep === "done") {
           await finalizeAdmissionConversation(merged, false);
           return true;
@@ -5192,40 +5293,38 @@ export default function VitalOsClient() {
       startVoiceSession();
       return;
     }
-    setMicMuted((prev) => {
-      const next = !prev;
-      micMutedRef.current = next;
-      if (next) {
-        intentionallyStoppedRef.current = true;
-        listeningIntentRef.current = false;
-        if (silenceTimerRef.current) {
-          clearTimeout(silenceTimerRef.current);
-          silenceTimerRef.current = null;
-        }
-        setInterimTranscript("");
-        setFinalTranscript("");
-        finalRef.current = "";
-        interimRef.current = "";
-        setHeardPreview("");
-        ignoreNextEndRef.current = true;
-        try {
-          recognitionRef.current?.abort();
-        } catch {
-          /* noop */
-        }
-        recognitionRef.current = null;
-        recognitionActiveRef.current = false;
-        stopListening({ submit: false });
-        recorderRef.current.stop();
-        setSystemState("idle");
-      } else {
-        intentionallyStoppedRef.current = false;
-        listeningIntentRef.current = true;
-        void recorderRef.current.start();
-        void startListening({ hard: false });
+    const next = !micMutedRef.current;
+    micMutedRef.current = next;
+    setMicMuted(next);
+    if (next) {
+      intentionallyStoppedRef.current = true;
+      listeningIntentRef.current = false;
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
       }
-      return next;
-    });
+      setInterimTranscript("");
+      setFinalTranscript("");
+      finalRef.current = "";
+      interimRef.current = "";
+      setHeardPreview("");
+      ignoreNextEndRef.current = true;
+      try {
+        recognitionRef.current?.abort();
+      } catch {
+        /* noop */
+      }
+      recognitionRef.current = null;
+      recognitionActiveRef.current = false;
+      stopListening({ submit: false });
+      recorderRef.current.stop();
+      setSystemState("idle");
+    } else {
+      intentionallyStoppedRef.current = false;
+      listeningIntentRef.current = true;
+      void recorderRef.current.start();
+      void startListening({ hard: false });
+    }
   }, [startListening, startVoiceSession, stopListening, voiceSessionLive]);
 
   const handleEmergency = React.useCallback(() => {
@@ -5804,11 +5903,18 @@ export default function VitalOsClient() {
                               <input
                                 type={type}
                                 value={admitDraft[key]}
-                                onChange={(e) =>
-                                  setAdmitDraft((prev) => ({ ...prev, [key]: e.target.value }))
-                                }
+                                onChange={(e) => {
+                                  const value = e.target.value;
+                                  setAdmitDraft((prev) => ({ ...prev, [key]: value }));
+                                  if (key === "room") setAdmitRoomError(null);
+                                }}
                                 className="mt-1 w-full rounded-lg border border-border bg-card px-3 py-1.5 text-sm text-foreground outline-none focus:border-ring"
                               />
+                              {key === "room" && admitRoomError ? (
+                                <span className="mt-1 block text-[11px] font-normal text-rose-600 dark:text-rose-300">
+                                  {admitRoomError}
+                                </span>
+                              ) : null}
                             </label>
                           ))}
                           <label className="text-xs font-medium text-foreground">
@@ -5845,6 +5951,17 @@ export default function VitalOsClient() {
                             size="sm"
                             onClick={() => {
                               void (async () => {
+                                const requestedRoom = admitDraft.room.trim();
+                                const occupant = findActiveOccupantByRoom(
+                                  patients,
+                                  requestedRoom
+                                );
+                                if (occupant) {
+                                  setAdmitRoomError(
+                                    `Room ${requestedRoom || "(blank)"} is currently occupied by ${occupant.name}. Please specify a different room.`
+                                  );
+                                  return;
+                                }
                                 const res = await fetch("/api/patients", {
                                   method: "POST",
                                   headers: { "Content-Type": "application/json" },
@@ -5860,6 +5977,7 @@ export default function VitalOsClient() {
                                 });
                                 if (!res.ok) return;
                                 setAdmitFormOpen(false);
+                                setAdmitRoomError(null);
                                 setAdmitDraft({
                                   name: "",
                                   room: "",

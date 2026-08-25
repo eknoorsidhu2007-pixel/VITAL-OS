@@ -33,6 +33,7 @@ const POLITE_PREFIXES = [
   /^i need you to\s+/i,
   /^i'd like to\s+/i,
   /^i would like to\s+/i,
+  /^i want to\s+/i,
   /^let's\s+/i,
 ];
 
@@ -42,7 +43,11 @@ const INVALID_NAME_PHRASES = new Set([
   "admit patient",
   "admit a patient",
   "i'd like to admit a patient",
+  "i'd like to admit patient",
   "i would like to admit a patient",
+  "i would like to admit patient",
+  "i want to admit a patient",
+  "i want to admit patient",
   "can you admit patient",
   "please admit patient",
   "patient",
