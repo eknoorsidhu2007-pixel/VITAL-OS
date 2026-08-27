@@ -14,6 +14,23 @@ export function normalizePatientName(name: string): string {
   return name.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+/** Strip voice filler / punctuation that break exact roster matching. */
+function sanitizeExtractedPatientName(raw: string): string {
+  let name = raw.trim();
+  if (!name) return name;
+  name = name.replace(/^(?:the\s+)?(?:patient\s+)?/i, "").trim();
+  name = name.replace(
+    /\s+from\s+(?:the\s+)?(?:board|roster|list|chart|ed)\b.*$/i,
+    ""
+  );
+  name = name.replace(
+    /\s+(?:please|now|thanks|thank you)(?:\s+.*)?$/i,
+    ""
+  );
+  name = name.replace(/[.?!,:;]+$/g, "").trim();
+  return name;
+}
+
 function normalizeMrnToken(raw: string): string {
   const t = raw.trim().toUpperCase().replace(/\s+/g, "");
   if (/^\d+$/.test(t)) return `MRN-${t}`;
@@ -44,34 +61,49 @@ export function extractModificationPatientName(
   patientHint?: string | null
 ): string | null {
   const hinted = patientHint?.trim();
-  if (hinted) return hinted;
+  if (hinted) {
+    const cleanedHint = sanitizeExtractedPatientName(hinted);
+    return cleanedHint || null;
+  }
 
   const cleaned = transcript.trim();
   for (const rx of MODIFICATION_NAME_PATTERNS) {
     const m = cleaned.match(rx);
-    const name = m?.[1]?.trim();
+    const name = m?.[1] ? sanitizeExtractedPatientName(m[1]) : "";
     if (name && !/^(?:patient|the|a|an)$/i.test(name)) {
-      return name.replace(/\s+(?:to|for|in)\s+room.*$/i, "").trim() || null;
+      return (
+        sanitizeExtractedPatientName(
+          name.replace(/\s+(?:to|for|in)\s+room.*$/i, "")
+        ) || null
+      );
     }
   }
 
   const fullName = cleaned.match(
     /\b([A-Za-z][A-Za-z'-]+(?:\s+[A-Za-z][A-Za-z'-]+)+)\b/
   );
-  return fullName?.[1]?.trim() ?? null;
+  return fullName?.[1]
+    ? sanitizeExtractedPatientName(fullName[1]) || null
+    : null;
 }
 
 function exactNameMatches(patients: DemoPatient[], requestedName: string): DemoPatient[] {
-  const target = normalizePatientName(requestedName);
+  const target = normalizePatientName(sanitizeExtractedPatientName(requestedName));
   if (!target) return [];
   return patients.filter((p) => {
-    const names = [p.name, p.preferredName ?? ""].map(normalizePatientName);
-    return names.some((name) => name === target);
+    const names = [p.name, p.preferredName ?? ""]
+      .map(normalizePatientName)
+      .filter(Boolean);
+    return names.some(
+      (name) => name === target || target.startsWith(`${name} `)
+    );
   });
 }
 
 function firstNameMatches(patients: DemoPatient[], requestedName: string): DemoPatient[] {
-  const parts = normalizePatientName(requestedName).split(" ").filter(Boolean);
+  const parts = normalizePatientName(sanitizeExtractedPatientName(requestedName))
+    .split(" ")
+    .filter(Boolean);
   if (parts.length !== 1) return [];
   const first = parts[0];
   return patients.filter((p) => {
