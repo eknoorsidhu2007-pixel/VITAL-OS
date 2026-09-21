@@ -1,11 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { Eye, EyeOff, Shield } from "lucide-react";
+import { Eye, EyeOff, Shield, TestTube2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { VitalLogo } from "@/components/vital-logo";
 import { useAuth } from "@/components/auth-provider";
+
+const DEMO_EMAIL = "dr.sarah.wilson@test.com";
+const DEMO_PASSWORD = "VitalOS2026!Doctor";
 
 export function LoginScreen() {
   const { login } = useAuth();
@@ -15,11 +18,18 @@ export function LoginScreen() {
   const [error, setError] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
 
+  const fillDemoCredentials = () => {
+    setEmail(DEMO_EMAIL);
+    setPassword(DEMO_PASSWORD);
+    setError(null);
+  };
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
     const trimmedEmail = email.trim();
+
     if (!trimmedEmail || !password) {
       setError("Enter your email and password.");
       return;
@@ -51,10 +61,47 @@ export function LoginScreen() {
             <p className="vital-footnote uppercase tracking-[0.16em]">
               Secure sign-in
             </p>
+
             <h1 className="vital-h1 text-xl">Sign in to VITAL OS</h1>
+
             <p className="vital-body">
-              Use the credentials issued for your clinical account.
+              Use your clinical account or the demonstration account below.
             </p>
+          </div>
+
+          <div className="w-full rounded-xl border border-primary/20 bg-primary/5 p-4 text-left">
+            <div className="flex items-center gap-2">
+              <TestTube2
+                className="h-4 w-4 text-primary"
+                aria-hidden="true"
+              />
+              <p className="text-sm font-semibold">Recruiter Demo Account</p>
+            </div>
+
+            <p className="mt-1 text-xs text-muted-foreground">
+              Explore VITAL OS using synthetic patient records.
+            </p>
+
+            <dl className="mt-3 space-y-2 rounded-lg border border-border/60 bg-background/60 p-3 text-xs">
+              <div className="flex flex-wrap justify-between gap-2">
+                <dt className="text-muted-foreground">Email</dt>
+                <dd className="font-mono">{DEMO_EMAIL}</dd>
+              </div>
+
+              <div className="flex flex-wrap justify-between gap-2">
+                <dt className="text-muted-foreground">Password</dt>
+                <dd className="font-mono">{DEMO_PASSWORD}</dd>
+              </div>
+            </dl>
+
+            <Button
+              type="button"
+              variant="outline"
+              className="mt-3 w-full"
+              onClick={fillDemoCredentials}
+            >
+              Fill Demo Credentials
+            </Button>
           </div>
 
           <form
@@ -63,6 +110,7 @@ export function LoginScreen() {
           >
             <label className="space-y-1.5">
               <span className="vital-label">Email</span>
+
               <input
                 type="email"
                 value={email}
@@ -78,6 +126,7 @@ export function LoginScreen() {
 
             <label className="space-y-1.5">
               <span className="vital-label">Password</span>
+
               <div className="relative">
                 <input
                   type={showPassword ? "text" : "password"}
@@ -90,16 +139,17 @@ export function LoginScreen() {
                   placeholder="Enter your password"
                   className="vital-input pr-10"
                 />
+
                 <button
                   type="button"
-                  onClick={() => setShowPassword((v) => !v)}
+                  onClick={() => setShowPassword((visible) => !visible)}
                   className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/40"
                   aria-label={showPassword ? "Hide password" : "Show password"}
                 >
                   {showPassword ? (
-                    <EyeOff className="h-4 w-4" aria-hidden />
+                    <EyeOff className="h-4 w-4" aria-hidden="true" />
                   ) : (
-                    <Eye className="h-4 w-4" aria-hidden />
+                    <Eye className="h-4 w-4" aria-hidden="true" />
                   )}
                 </button>
               </div>
@@ -115,12 +165,15 @@ export function LoginScreen() {
             ) : null}
 
             <Button type="submit" disabled={submitting} className="mt-1">
-              {submitting ? "Signing in…" : "Sign in"}
+              {submitting ? "Signing in..." : "Sign in"}
             </Button>
           </form>
 
           <p className="vital-footnote flex items-center justify-center gap-2">
-            <Shield className="h-3.5 w-3.5 text-muted-foreground" aria-hidden />
+            <Shield
+              className="h-3.5 w-3.5 text-muted-foreground"
+              aria-hidden="true"
+            />
             Your role and permissions come from your account.
           </p>
         </div>
