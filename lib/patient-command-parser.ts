@@ -5,6 +5,9 @@
 
 import { cleanVoiceCommand } from "@/lib/admission-parser";
 
+export const PERMISSION_DENIED_MESSAGE =
+  "You do not have permission to perform that action.";
+
 export type PatientCommandIntent =
   | "addMedication"
   | "removeMedication"
